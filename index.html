@@ -9,105 +9,138 @@
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+
+/* ── Matrix canvas ───────────────────────────────────────────────── */
 #c { position: fixed; transform-origin: center center; }
-body::after {
+body::after {  /* scanlines */
   content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 20;
   background: repeating-linear-gradient(transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px);
 }
-body::before {
+body::before {  /* vignette */
   content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 21;
   background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.72) 100%);
 }
+
+/* ── C64 boot overlay ────────────────────────────────────────────── */
+#c64-boot {
+  position: fixed; inset: 0; z-index: 50;
+  background: #3535CA;           /* border colour  — C64 blue $06  */
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 1.2s ease-in;
+  font-family: 'Press Start 2P', 'Courier New', monospace;
+}
+#c64-boot.fade-out { opacity: 0; pointer-events: none; }
+
+#c64-screen {
+  background: #3535CA;           /* screen colour  — same as border */
+  color: #7070DE;                /* text colour    — C64 light blue  */
+  /* Border: simulate the C64's slightly different outer rim */
+  outline: clamp(12px,3vw,28px) solid #2828A8;
+  outline-offset: 0;
+  width:  min(90vw, calc(40ch + 1em));
+  padding: 0.6em 0.8em 1.2em;
+  font-size: clamp(7px, 1.8vw, 13px);
+  line-height: 1.75;
+  white-space: pre;
+  letter-spacing: 0.05em;
+  image-rendering: pixelated;
+}
+
+/* blinking block cursor */
+#c64-cursor {
+  display: inline-block;
+  width: 0.85em; height: 1.1em;
+  background: #7070DE;
+  vertical-align: bottom;
+  margin-bottom: -0.05em;
+  animation: blink 0.8s step-start infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
 #gyro-hint {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   color: rgba(0,180,0,0.5); font: 11px monospace; letter-spacing:.1em;
-  pointer-events: none; z-index: 30; transition: opacity 1s;
+  pointer-events: none; z-index: 60; transition: opacity 1s;
 }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+
+<!-- C64 boot screen overlay -->
+<div id="c64-boot">
+  <div id="c64-screen"><span id="c64-text"></span><span id="c64-cursor"></span></div>
+</div>
+
 <div id="gyro-hint" style="display:none">TAP TO ENABLE GYRO</div>
 <script>
 'use strict';
 // ═══════════════════════════════════════════════════════════════════════
-// CHUNKY MATRIX  —  Press Start 2P pixel font + Space Invader sprites
-//
-// Main characters use the Press Start 2P Google Font (the 8-bit pixel
-// look shown in the font specimen).
-// Every ~6th head cell is replaced by a canvas-drawn Space Invader
-// sprite (3 classic types: crab, jellyfish, squid). The sprite
-// descends and recolours through the trail exactly like a text glyph.
+// CHUNKY MATRIX  —  C64 boot → PETSCII chaos → Matrix rain
+// ───────────────────────────────────────────────────────────────────────
+// States:  BOOT → TYPING → LOADING → CHAOS → DISSOLVE → MATRIX
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── Colours (C64 palette) ───────────────────────────────────────────
+// ── C64 colour palette (VICE/Pepto NTSC) ────────────────────────────
+const C64_PAL = [
+  '#000000','#FFFFFF','#883322','#AAFFEE',
+  '#CC44CC','#44BB44','#3333AA','#EEEE77',
+  '#DD8833','#664400','#FF7755','#333333',
+  '#777777','#AAEEAA','#7070DE','#BBBBBB',
+];
+const C64_SCREEN  = '#3535CA';   // blue (colour 6)
+const C64_TEXT    = '#7070DE';   // light blue (colour 14)
+
+// ── Matrix colours ───────────────────────────────────────────────────
 const C_HEAD = '#ffffff';
 const C_TR1  = '#92f792';
 const C_TR2  = '#009900';
 const C_DIM  = '#1b3a1b';
 const C_BG   = '#000000';
 
-// ── Character set (C64 $00-$1F range, space excluded) ───────────────
-const CHARS = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
+// ── Character sets ───────────────────────────────────────────────────
+const MATRIX_CHARS = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
+// PETSCII-ish chaos set: uppercase, digits, symbols
+const PETSCII = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*+=-|/<>?!:.';
 
 const FPS = 20;
+const INV_SENTINELS = ['\x01','\x02','\x03'];
+const INVADER_CHANCE = 6;
 
-// ── Space Invader sprites — 3 classic types, 8×8 pixel bitmaps ──────
-// Each row is 8 bits. Bit 7 = leftmost pixel.
+// ── Space Invader pixel sprites (8×8 bitmaps) ───────────────────────
 const SPRITES = [
-  // Type A — Crab
-  [0b00100100,
-   0b00011000,
-   0b00111100,
-   0b01101110,
-   0b11111111,
-   0b10111101,
-   0b10000001,
-   0b01100110],
-
-  // Type B — Jellyfish
-  [0b00011000,
-   0b00111100,
-   0b01111110,
-   0b11011011,
-   0b11111111,
-   0b00100100,
-   0b01011010,
-   0b10100101],
-
-  // Type C — Squid
-  [0b00111100,
-   0b01111110,
-   0b11111111,
-   0b11011011,
-   0b11111111,
-   0b00100100,
-   0b01011010,
-   0b10100101],
+  [0b00100100,0b00011000,0b00111100,0b01101110,
+   0b11111111,0b10111101,0b10000001,0b01100110], // crab
+  [0b00011000,0b00111100,0b01111110,0b11011011,
+   0b11111111,0b00100100,0b01011010,0b10100101], // jellyfish
+  [0b00111100,0b01111110,0b11111111,0b11011011,
+   0b11111111,0b00100100,0b01011010,0b10100101], // squid
 ];
 
-// Sentinel values stored in grid to flag invader cells
-const INV_SENTINELS = ['\x01', '\x02', '\x03'];
-const INVADER_CHANCE = 6; // 1-in-N chance the head is an invader
+// ── State machine ────────────────────────────────────────────────────
+// BOOT → TYPING → LOADING → CHAOS → DISSOLVE → MATRIX
+let appState = 'BOOT';
 
 // ── Canvas / context ─────────────────────────────────────────────────
 const cvs = document.getElementById('c');
 const ctx  = cvs.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 
+let CELL_W, CELL_H, FONT_PX;
+let COLS = 0, ROWS = 0;
+let columns = [], grid = [];
+// Chaos state
+let chaosGrid   = [];  // { ch, color } per cell during CHAOS/DISSOLVE
+let dissolveT   = 0;
+
 // ── Viewport-relative cell sizing ────────────────────────────────────
 function chunkSize(W) {
   const cols = W < 480 ? 8 : W < 900 ? 13 : 24;
   const w = Math.round(W / cols);
   const h = Math.round(w * 1.28);
-  // Press Start 2P: snap font size to multiple of 8 for crisp pixels
   const f = Math.max(8, Math.floor(w * 0.72 / 8) * 8);
   return { w, h, f };
 }
-
-let CELL_W, CELL_H, FONT_PX;
-let COLS = 0, ROWS = 0;
-let columns = [], grid = [];
 
 // ── Gyroscope ────────────────────────────────────────────────────────
 let targetAngle = 0, currentAngle = 0;
@@ -151,72 +184,113 @@ function resize() {
   ROWS = Math.ceil(D / CELL_H);
   ctx.font = `${FONT_PX}px 'Press Start 2P', monospace`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = C_BG; ctx.fillRect(0, 0, D, D);
-  grid    = Array.from({ length: COLS }, () => new Array(ROWS).fill(' '));
-  columns = Array.from({ length: COLS }, (_, i) => makeColumn(i));
+  // Fill with C64 blue during boot, black for matrix
+  ctx.fillStyle = appState === 'MATRIX' ? C_BG : C64_SCREEN;
+  ctx.fillRect(0, 0, D, D);
+  grid      = Array.from({ length: COLS }, () => new Array(ROWS).fill(' '));
+  chaosGrid = Array.from({ length: COLS }, () =>
+    Array.from({ length: ROWS }, () => ({ ch: ' ', col: C64_SCREEN })));
+  columns   = Array.from({ length: COLS }, (_, i) => makeColumn(i));
 }
 window.addEventListener('resize', resize, { passive: true });
 
-// ── Invader sprite drawing ────────────────────────────────────────────
+// ── Draw helpers ──────────────────────────────────────────────────────
 function drawSprite(px, py, type, color, glow) {
-  const bitmap = SPRITES[type];
-  const rows = bitmap.length;     // 8
-  const pw = Math.max(1, Math.floor(CELL_W / 10)); // pixel size
-  const sprW = pw * 8, sprH = pw * rows;
-  const ox = px + Math.round((CELL_W - sprW) / 2);
-  const oy = py + Math.round((CELL_H - sprH) / 2);
+  const bm = SPRITES[type];
+  const pw = Math.max(1, Math.floor(CELL_W / 10));
+  const ox = px + Math.round((CELL_W - pw*8) / 2);
+  const oy = py + Math.round((CELL_H - pw*8) / 2);
   if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = pw * 4; }
   ctx.fillStyle = color;
-  for (let r = 0; r < rows; r++) {
-    const row = bitmap[r];
-    for (let b = 7; b >= 0; b--) {
-      if (row & (1 << b)) {
-        ctx.fillRect(ox + (7-b)*pw, oy + r*pw, pw, pw);
-      }
-    }
-  }
+  for (let r = 0; r < 8; r++)
+    for (let b = 7; b >= 0; b--)
+      if (bm[r] & (1 << b)) ctx.fillRect(ox+(7-b)*pw, oy+r*pw, pw, pw);
   if (glow) ctx.shadowBlur = 0;
 }
 
-// ── Draw cell (char or invader) ────────────────────────────────────────
-function drawCell(c, r, ch, color, glow) {
+function drawCell(c, r, ch, color, glow, bg) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
-  const px = c * CELL_W, py = r * CELL_H;
+  const px = c*CELL_W, py = r*CELL_H;
   ctx.shadowBlur = 0;
-  ctx.fillStyle  = C_BG;
+  ctx.fillStyle  = bg || C_BG;
   ctx.fillRect(px, py, CELL_W, CELL_H);
   if (ch !== ' ') {
-    const invIdx = INV_SENTINELS.indexOf(ch);
-    if (invIdx >= 0) {
-      drawSprite(px, py, invIdx, color, glow);
-    } else {
-      if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = CELL_W * 0.4; }
+    const inv = INV_SENTINELS.indexOf(ch);
+    if (inv >= 0) { drawSprite(px, py, inv, color, glow); }
+    else {
+      if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = CELL_W*0.4; }
       ctx.fillStyle = color;
-      ctx.fillText(ch, px + CELL_W/2, py + CELL_H/2);
+      ctx.fillText(ch, px+CELL_W/2, py+CELL_H/2);
       if (glow) ctx.shadowBlur = 0;
     }
   }
   grid[c][r] = ch;
 }
 
-// Colour-only repaint — character/sprite unchanged
 function recolour(c, r, color) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
   const ch = grid[c][r];
   if (ch === ' ') return;
-  const px = c * CELL_W, py = r * CELL_H;
+  const px = c*CELL_W, py = r*CELL_H;
   ctx.fillStyle = C_BG; ctx.fillRect(px, py, CELL_W, CELL_H);
-  const invIdx = INV_SENTINELS.indexOf(ch);
-  if (invIdx >= 0) {
-    drawSprite(px, py, invIdx, color, false);
-  } else {
-    ctx.fillStyle = color;
-    ctx.fillText(ch, px + CELL_W/2, py + CELL_H/2);
+  const inv = INV_SENTINELS.indexOf(ch);
+  if (inv >= 0) { drawSprite(px, py, inv, color, false); }
+  else { ctx.fillStyle = color; ctx.fillText(ch, px+CELL_W/2, py+CELL_H/2); }
+}
+
+// ── CHAOS: fill entire canvas with random PETSCII in C64 colours ─────
+let chaosScanRow = 0;
+const CHAOS_ROWS_PER_FRAME = 3;
+
+function updateChaos() {
+  // Scan down the grid like a C64 loading data into video RAM
+  for (let pass = 0; pass < CHAOS_ROWS_PER_FRAME; pass++) {
+    if (chaosScanRow >= ROWS) {
+      // Full screen filled — start DISSOLVE
+      if (appState === 'CHAOS') {
+        appState = 'DISSOLVE';
+        dissolveT = 0;
+        // Black out background under the chaos so Matrix can emerge
+        ctx.fillStyle = C_BG;
+        ctx.fillRect(0, 0, cvs.width, cvs.height);
+        // Redraw chaos onto black bg
+        for (let x = 0; x < COLS; x++)
+          for (let y = 0; y < ROWS; y++) {
+            const cell = chaosGrid[x][y];
+            if (cell.ch !== ' ') {
+              ctx.fillStyle = cell.col;
+              ctx.fillText(cell.ch, x*CELL_W+CELL_W/2, y*CELL_H+CELL_H/2);
+            }
+          }
+        // Begin Matrix columns (they'll overwrite chaos as they fall)
+        columns = Array.from({ length: COLS }, (_, i) => makeColumn(i));
+        grid    = Array.from({ length: COLS }, () => new Array(ROWS).fill(' '));
+      }
+      return;
+    }
+    for (let x = 0; x < COLS; x++) {
+      const ch  = PETSCII[Math.random() * PETSCII.length | 0];
+      const col = C64_PAL[Math.random() * C64_PAL.length | 0];
+      chaosGrid[x][chaosScanRow] = { ch, col };
+      drawCell(x, chaosScanRow, ch, col, false, C64_SCREEN);
+    }
+    chaosScanRow++;
   }
 }
 
-// ── Update (C64 algorithm) ─────────────────────────────────────────────
-function update() {
+// ── DISSOLVE: Matrix columns overwrite chaos cells ────────────────────
+function updateDissolve() {
+  dissolveT++;
+  // Run matrix update — it will paint over chaos cells naturally
+  updateMatrix();
+  // After enough frames most chaos is replaced → full MATRIX
+  if (dissolveT > ROWS * 3) {
+    appState = 'MATRIX';
+  }
+}
+
+// ── MATRIX update (C64 algorithm) ────────────────────────────────────
+function updateMatrix() {
   for (let x = 0; x < COLS; x++) {
     const col = columns[x];
     if (--col.delay > 0) continue;
@@ -229,19 +303,26 @@ function update() {
       col.len   = (Math.random() * 16 | 0) + 6;
     }
     const r = col.row;
-    drawCell(x, r - col.len,     ' ',  C_BG);
-    recolour(x,  r - col.len + 1, C_DIM);
-    recolour(x,  r - 2,           C_TR2);
-    recolour(x,  r - 1,           C_TR1);
+    drawCell(x, r-col.len,    ' ',  C_BG);
+    recolour(x,  r-col.len+1,  C_DIM);
+    recolour(x,  r-2,          C_TR2);
+    recolour(x,  r-1,          C_TR1);
+    let hd;
+    if ((Math.random()*INVADER_CHANCE|0) === 0)
+      hd = INV_SENTINELS[Math.random()*SPRITES.length|0];
+    else
+      hd = MATRIX_CHARS[Math.random()*MATRIX_CHARS.length|0];
+    drawCell(x, r, hd, C_HEAD, true);
+  }
+}
 
-    // 1-in-INVADER_CHANCE chance: drop a Space Invader instead of a letter
-    let headCh;
-    if ((Math.random() * INVADER_CHANCE | 0) === 0) {
-      headCh = INV_SENTINELS[Math.random() * SPRITES.length | 0];
-    } else {
-      headCh = CHARS[Math.random() * CHARS.length | 0];
-    }
-    drawCell(x, r, headCh, C_HEAD, true);
+// ── Per-frame dispatcher ──────────────────────────────────────────────
+function update() {
+  switch (appState) {
+    case 'CHAOS':    updateChaos();    break;
+    case 'DISSOLVE': updateDissolve(); break;
+    case 'MATRIX':   updateMatrix();   break;
+    // BOOT/TYPING/LOADING handled by the C64 sequence; canvas is idle
   }
 }
 
@@ -257,14 +338,99 @@ function frame(t) {
     cvs.style.transform = `rotate(${currentAngle.toFixed(4)}rad)`;
   }
   if (t - lastT < STEP_MS) return;
-  lastT = t - ((t - lastT) % STEP_MS);
+  lastT = t - ((t-lastT) % STEP_MS);
   update();
 }
 
-// Wait for Press Start 2P to load before first draw
+// ── C64 Boot Sequence ─────────────────────────────────────────────────
+const c64text   = document.getElementById('c64-text');
+const c64boot   = document.getElementById('c64-boot');
+const c64cursor = document.getElementById('c64-cursor');
+
+// Type text one character at a time, return a promise that resolves when done
+function typeText(str, delayMs) {
+  return new Promise(resolve => {
+    let i = 0;
+    function next() {
+      if (i >= str.length) { resolve(); return; }
+      c64text.textContent += str[i++];
+      setTimeout(next, delayMs + Math.random() * delayMs * 0.3);
+    }
+    next();
+  });
+}
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+function appendLine(str) { c64text.textContent += str + '\n'; }
+
+async function runC64Boot() {
+  // ── Static boot header ──
+  appendLine('');
+  appendLine('    **** COMMODORE 64 BASIC V2 ****');
+  appendLine('');
+  appendLine(' 64K RAM SYSTEM  38911 BASIC BYTES FREE');
+  appendLine('');
+  appendLine('READY.');
+
+  await wait(900);
+
+  // ── User "types" the LOAD command ──
+  appState = 'TYPING';
+  await typeText('LOAD "CHUNKY_MATRIX",8,1', 55);
+  await wait(300);
+  c64text.textContent += '\n';
+
+  // ── Disk searching ──
+  appState = 'LOADING';
+  await wait(400);
+  appendLine('');
+  appendLine('SEARCHING FOR CHUNKY_MATRIX.');
+  await wait(700);
+
+  // ── LOADING. with dots ──
+  c64text.textContent += 'LOADING';
+  for (let i = 0; i < 5; i++) {
+    await wait(320);
+    c64text.textContent += '.';
+  }
+  c64text.textContent += '\n';
+  await wait(500);
+
+  appendLine('');
+  appendLine('READY.');
+  await wait(400);
+
+  // ── Cursor blinks on READY prompt while "executing" ──
+  c64cursor.style.display = 'none';
+  c64text.textContent += 'RUN';
+  await wait(200);
+  c64text.textContent += '\n';
+  c64cursor.style.display = '';
+  await wait(600);
+
+  // ── Trigger CHAOS: canvas starts filling with PETSCII ──
+  appState = 'CHAOS';
+  chaosScanRow = 0;
+  // Fill canvas with C64 blue before chaos begins
+  ctx.fillStyle = C64_SCREEN;
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
+
+  // Overlay fades out as chaos fills from behind
+  await wait(300);
+  c64boot.classList.add('fade-out');
+
+  // After fade completes, remove overlay from layout
+  await wait(1400);
+  c64boot.style.display = 'none';
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
 document.fonts.ready.then(() => {
   resize();
+  // Fill canvas with C64 blue for the boot phase
+  ctx.fillStyle = C64_SCREEN;
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
   requestAnimationFrame(frame);
+  runC64Boot();
 });
 </script>
 </body>
