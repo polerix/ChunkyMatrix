@@ -4,32 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Chunky Matrix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-
 #c { position: fixed; transform-origin: center center; }
-
-/* CRT scanlines */
 body::after {
-  content: '';
-  position: fixed; inset: 0;
-  background: repeating-linear-gradient(
-    transparent, transparent 3px,
-    rgba(0,0,0,0.12) 3px, rgba(0,0,0,0.12) 4px
-  );
-  pointer-events: none; z-index: 20;
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 20;
+  background: repeating-linear-gradient(transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px);
 }
-/* CRT vignette */
 body::before {
-  content: '';
-  position: fixed; inset: 0;
-  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
-  pointer-events: none; z-index: 21;
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 21;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.72) 100%);
 }
 #gyro-hint {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  color: rgba(0,180,0,0.5); font: 12px monospace; letter-spacing: 0.1em;
+  color: rgba(0,180,0,0.5); font: 11px monospace; letter-spacing:.1em;
   pointer-events: none; z-index: 30; transition: opacity 1s;
 }
 </style>
@@ -39,47 +30,87 @@ body::before {
 <div id="gyro-hint" style="display:none">TAP TO ENABLE GYRO</div>
 <script>
 'use strict';
-// ═══════════════════════════════════════════════════════════════════
-// CHUNKY MATRIX  —  C64 assembly algorithm, exaggerated cell size
-// Cell width is viewport-relative: ~8 columns on mobile, ~26 on desktop
-// ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// CHUNKY MATRIX  —  Press Start 2P pixel font + Space Invader sprites
+//
+// Main characters use the Press Start 2P Google Font (the 8-bit pixel
+// look shown in the font specimen).
+// Every ~6th head cell is replaced by a canvas-drawn Space Invader
+// sprite (3 classic types: crab, jellyfish, squid). The sprite
+// descends and recolours through the trail exactly like a text glyph.
+// ═══════════════════════════════════════════════════════════════════════
 
-// C64 palette
+// ── Colours (C64 palette) ───────────────────────────────────────────
 const C_HEAD = '#ffffff';
 const C_TR1  = '#92f792';
 const C_TR2  = '#009900';
 const C_DIM  = '#1b3a1b';
 const C_BG   = '#000000';
 
-// C64 screen codes $00–$1F (AND #$1F on SID noise; $20=space excluded)
+// ── Character set (C64 $00-$1F range, space excluded) ───────────────
 const CHARS = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
 
 const FPS = 20;
 
-// ── Cell sizing — the chungus knob ─────────────────────────────────
-// Target column counts: very few on narrow screens so each char is huge.
-function chunkSize(viewW) {
-  let targetCols;
-  if (viewW < 480)       targetCols = 8;   // phone portrait  → giant
-  else if (viewW < 900)  targetCols = 13;  // tablet portrait → big
-  else                   targetCols = 24;  // desktop         → chunky
-  const w = Math.round(viewW / targetCols);
-  const h = Math.round(w * 1.28);         // slightly taller than wide
-  const f = Math.round(w * 0.82);         // font fills ~82% of cell width
-  return { w, h, f };
-}
+// ── Space Invader sprites — 3 classic types, 8×8 pixel bitmaps ──────
+// Each row is 8 bits. Bit 7 = leftmost pixel.
+const SPRITES = [
+  // Type A — Crab
+  [0b00100100,
+   0b00011000,
+   0b00111100,
+   0b01101110,
+   0b11111111,
+   0b10111101,
+   0b10000001,
+   0b01100110],
 
+  // Type B — Jellyfish
+  [0b00011000,
+   0b00111100,
+   0b01111110,
+   0b11011011,
+   0b11111111,
+   0b00100100,
+   0b01011010,
+   0b10100101],
+
+  // Type C — Squid
+  [0b00111100,
+   0b01111110,
+   0b11111111,
+   0b11011011,
+   0b11111111,
+   0b00100100,
+   0b01011010,
+   0b10100101],
+];
+
+// Sentinel values stored in grid to flag invader cells
+const INV_SENTINELS = ['\x01', '\x02', '\x03'];
+const INVADER_CHANCE = 6; // 1-in-N chance the head is an invader
+
+// ── Canvas / context ─────────────────────────────────────────────────
 const cvs = document.getElementById('c');
 const ctx  = cvs.getContext('2d');
 ctx.imageSmoothingEnabled = false;
+
+// ── Viewport-relative cell sizing ────────────────────────────────────
+function chunkSize(W) {
+  const cols = W < 480 ? 8 : W < 900 ? 13 : 24;
+  const w = Math.round(W / cols);
+  const h = Math.round(w * 1.28);
+  // Press Start 2P: snap font size to multiple of 8 for crisp pixels
+  const f = Math.max(8, Math.floor(w * 0.72 / 8) * 8);
+  return { w, h, f };
+}
 
 let CELL_W, CELL_H, FONT_PX;
 let COLS = 0, ROWS = 0;
 let columns = [], grid = [];
 
-// ── Gyroscope ──────────────────────────────────────────────────────
+// ── Gyroscope ────────────────────────────────────────────────────────
 let targetAngle = 0, currentAngle = 0;
-
 function attachGyro() {
   window.addEventListener('deviceorientation', e => {
     if (e.gamma == null) return;
@@ -87,7 +118,6 @@ function attachGyro() {
     targetAngle = (g / 75) * (Math.PI * 0.55);
   }, { passive: true });
 }
-
 const hint = document.getElementById('gyro-hint');
 if (typeof DeviceOrientationEvent !== 'undefined') {
   if (typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -99,46 +129,56 @@ if (typeof DeviceOrientationEvent !== 'undefined') {
       setTimeout(() => { hint.style.display = 'none'; }, 1000);
       document.removeEventListener('touchstart', ask);
     }, { once: true });
-  } else {
-    attachGyro();
-  }
+  } else { attachGyro(); }
 }
 
-// ── Column factory ─────────────────────────────────────────────────
+// ── Column factory ────────────────────────────────────────────────────
 function makeColumn(x) {
   const sp = (Math.random() * 4 | 0) + 1;
   return { x, row: Math.random() * ROWS | 0, speed: sp, delay: sp,
            len: (Math.random() * 16 | 0) + 6 };
 }
 
-// ── Resize ─────────────────────────────────────────────────────────
+// ── Resize ────────────────────────────────────────────────────────────
 function resize() {
   const W = window.innerWidth, H = window.innerHeight;
   ({ w: CELL_W, h: CELL_H, f: FONT_PX } = chunkSize(W));
-
-  const D = Math.ceil(Math.sqrt(W * W + H * H)) + CELL_W * 2;
-  cvs.width  = D; cvs.height = D;
-  cvs.style.width  = D + 'px'; cvs.style.height = D + 'px';
-  cvs.style.left   = ((W - D) / 2) + 'px';
-  cvs.style.top    = ((H - D) / 2) + 'px';
-
+  const D = Math.ceil(Math.sqrt(W*W + H*H)) + CELL_W * 2;
+  cvs.width = D; cvs.height = D;
+  cvs.style.width = D+'px'; cvs.style.height = D+'px';
+  cvs.style.left = ((W-D)/2)+'px'; cvs.style.top = ((H-D)/2)+'px';
   COLS = Math.ceil(D / CELL_W);
   ROWS = Math.ceil(D / CELL_H);
-
-  ctx.font         = `900 ${FONT_PX}px "Courier New", monospace`;
-  ctx.textAlign    = 'center';
-  ctx.textBaseline = 'alphabetic';
-
-  ctx.fillStyle = C_BG;
-  ctx.fillRect(0, 0, D, D);
-
+  ctx.font = `${FONT_PX}px 'Press Start 2P', monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = C_BG; ctx.fillRect(0, 0, D, D);
   grid    = Array.from({ length: COLS }, () => new Array(ROWS).fill(' '));
   columns = Array.from({ length: COLS }, (_, i) => makeColumn(i));
 }
 window.addEventListener('resize', resize, { passive: true });
-resize();
 
-// ── Draw helpers ────────────────────────────────────────────────────
+// ── Invader sprite drawing ────────────────────────────────────────────
+function drawSprite(px, py, type, color, glow) {
+  const bitmap = SPRITES[type];
+  const rows = bitmap.length;     // 8
+  const pw = Math.max(1, Math.floor(CELL_W / 10)); // pixel size
+  const sprW = pw * 8, sprH = pw * rows;
+  const ox = px + Math.round((CELL_W - sprW) / 2);
+  const oy = py + Math.round((CELL_H - sprH) / 2);
+  if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = pw * 4; }
+  ctx.fillStyle = color;
+  for (let r = 0; r < rows; r++) {
+    const row = bitmap[r];
+    for (let b = 7; b >= 0; b--) {
+      if (row & (1 << b)) {
+        ctx.fillRect(ox + (7-b)*pw, oy + r*pw, pw, pw);
+      }
+    }
+  }
+  if (glow) ctx.shadowBlur = 0;
+}
+
+// ── Draw cell (char or invader) ────────────────────────────────────────
 function drawCell(c, r, ch, color, glow) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
   const px = c * CELL_W, py = r * CELL_H;
@@ -146,26 +186,36 @@ function drawCell(c, r, ch, color, glow) {
   ctx.fillStyle  = C_BG;
   ctx.fillRect(px, py, CELL_W, CELL_H);
   if (ch !== ' ') {
-    if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = CELL_W * 0.45; }
-    ctx.fillStyle = color;
-    ctx.fillText(ch, px + CELL_W / 2, py + CELL_H - Math.round(CELL_H * 0.12));
-    ctx.shadowBlur = 0;
+    const invIdx = INV_SENTINELS.indexOf(ch);
+    if (invIdx >= 0) {
+      drawSprite(px, py, invIdx, color, glow);
+    } else {
+      if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = CELL_W * 0.4; }
+      ctx.fillStyle = color;
+      ctx.fillText(ch, px + CELL_W/2, py + CELL_H/2);
+      if (glow) ctx.shadowBlur = 0;
+    }
   }
   grid[c][r] = ch;
 }
 
+// Colour-only repaint — character/sprite unchanged
 function recolour(c, r, color) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
   const ch = grid[c][r];
   if (ch === ' ') return;
   const px = c * CELL_W, py = r * CELL_H;
-  ctx.fillStyle = C_BG;
-  ctx.fillRect(px, py, CELL_W, CELL_H);
-  ctx.fillStyle = color;
-  ctx.fillText(ch, px + CELL_W / 2, py + CELL_H - Math.round(CELL_H * 0.12));
+  ctx.fillStyle = C_BG; ctx.fillRect(px, py, CELL_W, CELL_H);
+  const invIdx = INV_SENTINELS.indexOf(ch);
+  if (invIdx >= 0) {
+    drawSprite(px, py, invIdx, color, false);
+  } else {
+    ctx.fillStyle = color;
+    ctx.fillText(ch, px + CELL_W/2, py + CELL_H/2);
+  }
 }
 
-// ── Update (C64 algorithm) ──────────────────────────────────────────
+// ── Update (C64 algorithm) ─────────────────────────────────────────────
 function update() {
   for (let x = 0; x < COLS; x++) {
     const col = columns[x];
@@ -183,11 +233,19 @@ function update() {
     recolour(x,  r - col.len + 1, C_DIM);
     recolour(x,  r - 2,           C_TR2);
     recolour(x,  r - 1,           C_TR1);
-    drawCell(x,  r, CHARS[Math.random() * CHARS.length | 0], C_HEAD, true);
+
+    // 1-in-INVADER_CHANCE chance: drop a Space Invader instead of a letter
+    let headCh;
+    if ((Math.random() * INVADER_CHANCE | 0) === 0) {
+      headCh = INV_SENTINELS[Math.random() * SPRITES.length | 0];
+    } else {
+      headCh = CHARS[Math.random() * CHARS.length | 0];
+    }
+    drawCell(x, r, headCh, C_HEAD, true);
   }
 }
 
-// ── Render loop ─────────────────────────────────────────────────────
+// ── Render loop ───────────────────────────────────────────────────────
 const STEP_MS = 1000 / FPS;
 let lastT = 0;
 
@@ -203,7 +261,11 @@ function frame(t) {
   update();
 }
 
-requestAnimationFrame(frame);
+// Wait for Press Start 2P to load before first draw
+document.fonts.ready.then(() => {
+  resize();
+  requestAnimationFrame(frame);
+});
 </script>
 </body>
 </html>
