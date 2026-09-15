@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Chunky Matrix</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+
+/* Canvas is oversized (diagonal of viewport) and centred so rotation never shows gaps */
+#c {
+  position: fixed;
+  transform-origin: center center;
+}
+
+/* CRT scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    transparent,
+    transparent 3px,
+    rgba(0, 0, 0, 0.10) 3px,
+    rgba(0, 0, 0, 0.10) 4px
+  );
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* CRT vignette */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.65) 100%);
+  pointer-events: none;
+  z-index: 21;
+}
+
+/* iOS gyro permission tap hint */
+#gyro-hint {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(0, 180, 0, 0.5);
+  font: 12px monospace;
+  letter-spacing: 0.1em;
+  pointer-events: none;
+  z-index: 30;
+  transition: opacity 1s;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="gyro-hint" style="display:none">TAP TO ENABLE GYRO</div>
+
+<script>
+'use strict';
+// ═══════════════════════════════════════════════════════════════════════════
+// C H U N K Y   M A T R I X  — browser port of the C64 assembly screensaver
+// ───────────────────────────────────────────────────────────────────────────
+// Algorithm is identical to the original 6502 design:
+//   • N columns (dynamic, fits viewport), each has: head-row, speed 1–4,
+//     trail-length 6–21, step-countdown
+//   • Per column step (when countdown expires):
+//       erase tail cell          (char→space)
+//       dim  tail+1              (colour only → dark grey-green)
+//       body row-2               (colour only → green)
+//       trail row-1              (colour only → light green)
+//       head row                 (new random glyph + white + phosphor glow)
+//   • Only ~half the columns move each frame — identical stagger to the C64
+//   • ~20 fps logic cadence (PAL C64 ≈ 50 Hz; throttled for chunky feel)
+//
+// Extras vs the original:
+//   • Head glyph gets a bright green canvas shadow (phosphor bloom)
+//   • CRT scanlines + vignette via CSS pseudo-elements
+//   • DeviceOrientation: the canvas rotates to match gravity so on mobile
+//     the rain genuinely falls with physics — tilt right, falls right
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Tunables ────────────────────────────────────────────────────────────────
+const CELL_W  = 20;
+const CELL_H  = 26;
+const FONT_PX = 19;
+const FPS     = 20;
+
+// C64 palette equivalents
+const C_HEAD = '#ffffff';
+const C_TR1  = '#92f792';
+const C_TR2  = '#009900';
+const C_DIM  = '#1b3a1b';
+const C_BG   = '#000000';
+
+// C64 screen codes $00–$1F (AND #$1F on SID noise); $20=space excluded
+const CHARS = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
+
+// ── Canvas / context ────────────────────────────────────────────────────────
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+// ── State ────────────────────────────────────────────────────────────────────
+let COLS = 0, ROWS = 0;
+let columns = [];
+let grid = []; // grid[c][r] = last char drawn (for colour-only repaints)
+
+// ── Gyroscope ────────────────────────────────────────────────────────────────
+let targetAngle  = 0;
+let currentAngle = 0;
+
+function attachGyro() {
+  window.addEventListener('deviceorientation', e => {
+    if (e.gamma == null) return;
+    const g = Math.max(-75, Math.min(75, e.gamma));
+    targetAngle = (g / 75) * (Math.PI * 0.55);
+  }, { passive: true });
+}
+
+const hint = document.getElementById('gyro-hint');
+
+if (typeof DeviceOrientationEvent !== 'undefined') {
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    hint.style.display = 'block';
+    document.addEventListener('touchstart', function askPerm() {
+      DeviceOrientationEvent.requestPermission().then(state => {
+        if (state === 'granted') attachGyro();
+      }).catch(() => {});
+      hint.style.opacity = '0';
+      setTimeout(() => { hint.style.display = 'none'; }, 1000);
+      document.removeEventListener('touchstart', askPerm);
+    }, { once: true });
+  } else {
+    attachGyro();
+  }
+}
+
+// ── Column factory ─────────────────────────────────────────────────────────
+function makeColumn(x) {
+  const sp = (Math.random() * 4 | 0) + 1;
+  return {
+    x,
+    row:   Math.random() * ROWS | 0,
+    speed: sp,
+    delay: sp,
+    len:   (Math.random() * 16 | 0) + 6,
+  };
+}
+
+// ── Canvas sizing ────────────────────────────────────────────────────────────
+function resize() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const D = Math.ceil(Math.sqrt(W * W + H * H)) + CELL_W * 2;
+
+  cvs.width  = D;
+  cvs.height = D;
+  cvs.style.width  = D + 'px';
+  cvs.style.height = D + 'px';
+  cvs.style.left   = ((W - D) / 2) + 'px';
+  cvs.style.top    = ((H - D) / 2) + 'px';
+
+  COLS = Math.ceil(D / CELL_W);
+  ROWS = Math.ceil(D / CELL_H);
+
+  ctx.font         = `bold ${FONT_PX}px "Courier New", monospace`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, D, D);
+
+  grid    = Array.from({ length: COLS }, () => new Array(ROWS).fill(' '));
+  columns = Array.from({ length: COLS }, (_, i) => makeColumn(i));
+}
+
+window.addEventListener('resize', resize, { passive: true });
+resize();
+
+// ── Cell drawing ─────────────────────────────────────────────────────────────
+function drawCell(c, r, ch, color, glow) {
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
+  const px = c * CELL_W, py = r * CELL_H;
+  ctx.fillStyle = C_BG;
+  ctx.shadowBlur = 0;
+  ctx.fillRect(px, py, CELL_W, CELL_H);
+  if (ch !== ' ') {
+    if (glow) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = 12; }
+    ctx.fillStyle = color;
+    ctx.fillText(ch, px + CELL_W / 2, py + CELL_H - 5);
+    ctx.shadowBlur = 0;
+  }
+  grid[c][r] = ch;
+}
+
+// Colour-only repaint — char unchanged (mirrors C64 colour-RAM-only writes)
+function recolour(c, r, color) {
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
+  const ch = grid[c][r];
+  if (ch === ' ') return;
+  const px = c * CELL_W, py = r * CELL_H;
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(px, py, CELL_W, CELL_H);
+  ctx.fillStyle = color;
+  ctx.fillText(ch, px + CELL_W / 2, py + CELL_H - 5);
+}
+
+// ── Per-frame update (mirrors `update` subroutine in the ASM) ────────────────
+function update() {
+  for (let x = 0; x < COLS; x++) {
+    const col = columns[x];
+    if (--col.delay > 0) continue;   // dec delay,x; beq uwork
+    col.delay = col.speed;
+    col.row++;
+
+    // Respawn when entire trail clears the bottom
+    if (col.row - col.len >= ROWS) {
+      col.row   = 0;
+      col.speed = (Math.random() * 4 | 0) + 1;
+      col.delay = col.speed;
+      col.len   = (Math.random() * 16 | 0) + 6;
+    }
+
+    const r = col.row;
+    drawCell(x, r - col.len,     ' ',  C_BG);           // +erase
+    recolour(x,  r - col.len + 1, C_DIM);               // +dimtail
+    recolour(x,  r - 2,           C_TR2);               // +fade 2 (green)
+    recolour(x,  r - 1,           C_TR1);               // +fade 1 (lt green)
+    drawCell(x,  r, CHARS[Math.random() * CHARS.length | 0], C_HEAD, true); // +head
+  }
+}
+
+// ── Animation loop ───────────────────────────────────────────────────────────
+const STEP_MS = 1000 / FPS;
+let lastT = 0;
+
+function frame(t) {
+  requestAnimationFrame(frame);
+
+  // Smooth gyroscope angle
+  const diff = targetAngle - currentAngle;
+  if (Math.abs(diff) > 0.0003) {
+    currentAngle += diff * 0.07;
+    cvs.style.transform = `rotate(${currentAngle.toFixed(4)}rad)`;
+  }
+
+  if (t - lastT < STEP_MS) return;
+  lastT = t - ((t - lastT) % STEP_MS);
+  update();
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
