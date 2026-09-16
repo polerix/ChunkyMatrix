@@ -48,16 +48,6 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   transition: opacity 1.4s ease-in;
 }
 
-/* CRT scanlines + vignette over screen area */
-#c64-screen-wrapper::after {
-  content:''; position:absolute; inset:0; pointer-events:none; z-index:20;
-  background:repeating-linear-gradient(transparent,transparent 3px,rgba(0,0,0,0.13) 3px,rgba(0,0,0,0.13) 4px);
-}
-#c64-screen-wrapper::before {
-  content:''; position:absolute; inset:0; pointer-events:none; z-index:21;
-  background:radial-gradient(ellipse at center, transparent 52%, rgba(0,0,0,0.65) 100%);
-}
-
 /* ── CONTROL STRIP — in the light-blue frame, below screen ───────── */
 #c64-controls {
   flex-shrink:0;
@@ -95,8 +85,11 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     <label title="A–Z symbols"><input type="checkbox" id="cb-en" checked> ABC</label>
     <span class="ctrl-div">|</span>
     <label title="Space Invader sprites"><input type="checkbox" id="cb-inv" checked> 👾</label>
+    <span class="ctrl-div">|</span>
+    <label title="Sound on/off"><input type="checkbox" id="cb-snd" checked> SND</label>
   </div>
 </div>
+<audio id="snd" src="soundtrack.mp4" loop preload="auto"></audio>
 <script>
 'use strict';
 // ════════════════════════════════════════════════════════════════════
@@ -497,6 +490,18 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   // Checkbox changes rebuild the active character pool
   [cbZh,cbEn,cbInv].forEach(cb=>cb.addEventListener('change',rebuildChars));
 
+  // ── Sound control ────────────────────────────────────────────────
+  const snd   = document.getElementById('snd');
+  const cbSnd = document.getElementById('cb-snd');
+
+  function applySound(){
+    if(cbSnd.checked){ snd.play().catch(()=>{}); }
+    else { snd.pause(); }
+  }
+  cbSnd.addEventListener('change', applySound);
+  // Also wire any user gesture on the page to unblock autoplay
+  document.addEventListener('click', ()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); }, {once:true});
+
   // Resize matrix canvas when window resizes (only while visible)
   window.addEventListener('resize',()=>{
     if(cvs.style.display!=='none'){ resize(); }
@@ -504,6 +509,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   // Called by the C64 loader IIFE after READY+RUN completes
   window.startMatrix=function(){
+    // Attempt autoplay; user can toggle SND if browser blocks it
+    const _snd=document.getElementById('snd');
+    const _cbSnd=document.getElementById('cb-snd');
+    if(_cbSnd.checked) _snd.play().catch(()=>{});
     rebuildChars();
     resize();
     const loader=document.getElementById('loader-cvs');
