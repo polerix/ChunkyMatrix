@@ -4,8 +4,8 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes
-> rounds 1-3, debug overlay).
+> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile bug
+> CLOSED after 3 rounds + device confirmation, README rewrite, hint plate).
 
 ## What this is
 
@@ -103,29 +103,70 @@ column per step).
 - **Controls strip**: checkboxes for CJK glyphs, ASCII glyphs, "SIG"
   (Space Invader sprite glyphs), and sound on/off.
 - **Discoverability hint**: `#colour-hint` fades in when rain starts,
-  fades out 5s later. Now `position:absolute` inside
-  `#c64-screen-wrapper` (was `position:fixed` on the viewport — see mobile
-  fixes below).
+  fades out 5s later. `position:absolute` inside `#c64-screen-wrapper`
+  (was `position:fixed` on the viewport — caused HUD collision on
+  mobile, fixed round 2). Has a semi-opaque backing plate
+  (`background:rgba(0,0,0,0.7)` + padding) so it stays legible over the
+  rain it sits on top of (confirmed unreadable without one on a real
+  device — fixed separately from the HUD-collision fix, they were two
+  different overlap problems).
 - **Audio**: `soundtrack.mp4` (~17.7MB, checked into repo directly, not
   Git LFS) as a looping `<audio>` element, gated behind a user gesture
   (autoplay policy) and the SND checkbox.
 
-README.md does not track any of this — see "Known stale" below.
+README.md is now current — rewritten this session, see below.
 
-## Current status: fix #3 pushed, NOT yet confirmed on the real device
+## Current status: mobile layout bug CLOSED, confirmed on real device
 
-`origin/main` is at `05645c6` (verify this matches the deployed hash —
-see "Immediate next steps", not yet done this pass). **Third** attempt at
-the mobile bug. Track record, plainly: round 1 (`c19602d`/`0d96c48`)
-"fixed and verified" — wrong, real device still broken. Round 2
-(`78822a5`) "fixed and verified" — PAUL-ERIC's own `?debug=1` readout
-from his iPhone 17 Pro (DPR3) proved round 2's canvas-box-size fix DID
-work (canvas CSS size == wrapper, confirmed both orientations) but caught
-a second, independent bug round 2's emulation never surfaced. Round 3
-(`05645c6`, this update) fixes that second bug. **Given the track record,
-treat round 3 as "fixes the specific defect the round-2 device readout
-proved," not as "confirmed working" — that word is earned by the next
-`?debug=1` readout from the device, not by anything in this file.**
+`origin/main` should be at this session's final commit — see "Immediate
+next steps" for the byte-for-byte deploy check (not yet done this pass).
+
+**CLOSED.** PAUL-ERIC confirmed on his actual iPhone 17 Pro (Chrome, iOS
+26, DPR3), both orientations, via `?debug=1`:
+- Portrait: `CSS_W/H` measured 378.0/634.0, canvas rect 378.0×634.0,
+  backing 1134×1902 (exactly 3×). `COLS/ROWS` 25/33 @ `CELL` 15/19.
+  `25×15=375 ≤ 378`, `33×19=627 ≤ 634`.
+- Landscape: `CSS_W/H` measured 708.0/272.0, canvas rect 708.0×272.0,
+  backing 2124×816 (exactly 3×). `COLS/ROWS` 54/16 @ `CELL` 13/17.
+  `54×13=702 ≤ 708`, `16×17=272` exact.
+
+Measured matches actual in both orientations; content never exceeds the
+drawable area; rain fills the full canvas. This closes a bug that took
+**three rounds** to actually fix — see "Root causes, for the record"
+immediately below so nobody has to re-derive them from commit history.
+
+### Root causes, for the record
+
+Two independent, unrelated bugs, both real-device-only (never reproduced
+by emulated testing until directly targeted):
+
+1. **Canvas box sizing (round 2, commit `78822a5`).** `#matrix-cvs` is a
+   *replaced element*. `position:absolute; inset:0;` does NOT stretch a
+   replaced element to fill its container — without explicit
+   `width`/`height` in CSS, it falls back to its *intrinsic* size, which
+   for `<canvas>` is its width/height **attributes**. Those attributes
+   were the DPR-scaled backing store (added for HiDPI crispness), so the
+   on-screen CSS box became `devicePixelRatio`× too large (2-3×),
+   clipped by the wrapper's `overflow:hidden`. Fix: add explicit
+   `width:100%; height:100%;` alongside `inset:0`. **This CSS rule must
+   never be removed** — see Settled Decisions.
+
+2. **Stale layout measurement (round 3, commit `05645c6`).**
+   `window.addEventListener('resize', ...)` fires when the browser
+   dispatches the event, not guaranteed to be after layout has *finished*
+   changing. On iOS Safari, the dynamic toolbar/safe-area can still be
+   animating when `resize` fires — especially post-rotation — so
+   `resize()` captured a transient, not-yet-final layout and then never
+   got called again once the toolbar settled. Fix: `ResizeObserver` on
+   `#c64-screen-wrapper` instead — it fires strictly after layout, for
+   the box's actual final size, however it got there. **Don't revert to
+   a `window resize`/`orientationchange` listener** — see Settled
+   Decisions.
+
+A distinct **cosmetic** issue surfaced by the same device confirmation:
+the tap-zone hint rendered inside the canvas, over actively-falling rain,
+both hard to read. Not a sizing bug — fixed separately (backing plate
+behind the hint text, commit `1cced0b`).
 
 ## Fixed this session (round 2): the REAL mobile bug — canvas box sizing
 
@@ -181,9 +222,10 @@ passes at DPR 1/2/3 (DPR 2 real emulation; 1 and 3 via
 `Object.defineProperty(window,'devicePixelRatio',...)` + dispatched
 `resize` — same `resize()` code path, no DPR-specific branching to miss),
 portrait 393×852, landscape 852×393, and an extreme landscape 844×320.
-Zero console errors throughout. **Not yet confirmed on PAUL-ERIC's actual
-iPhone** — that's the next step, via `?debug=1`, not another round of
-emulated guessing.
+Zero console errors throughout. **Later confirmed correct on PAUL-ERIC's
+actual iPhone 17 Pro** (canvas CSS size == wrapper, both orientations) —
+but that same device readout caught round 3's separate bug (below), so
+round 2's fix alone was necessary, not sufficient.
 
 **Earlier verification caveat, still true**: this session's browser pane
 runs backgrounded (`document.hidden === true`) and its `screenshot` tool
@@ -253,12 +295,13 @@ div fired within 200ms in the same hidden pane — which shows `RO` isn't
 universally suppressed there, just unusually slow for this specific
 viewport-driven delivery path while backgrounded. Not expected to
 reproduce on an actively-viewed real screen (nothing throttles rendering
-for a page someone is actually looking at), but this is exactly the kind
-of gap between "emulation says X" and "device says Y" that's bitten this
-project twice already — flagged, not asserted away. **The mechanism is
-verified correct; its timing on a real, foregrounded device is not
-something this harness can measure, and only the next on-device
-`?debug=1` readout settles it.**
+for a page someone is actually looking at), and this time that held:
+**PAUL-ERIC confirmed on-device afterward** (see "Current status" at the
+top) — measured matches actual in both orientations, content never
+exceeds the drawable area, rain fills the full canvas. Three rounds to
+get here; the caution above turned out to be warranted twice and
+unnecessary the third time, which is exactly why it stays disclosed
+rather than trimmed out now that it's over.
 
 ## Fixed this session (part 1): boot-freeze crash (root cause)
 
@@ -305,16 +348,12 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
 
 ## Known stale / not broken but wrong
 
-- **README.md is out of date.** Not touched this session — next in queue.
-  - References CRT scanline/vignette overlay and gyroscope tilt — both
-    *removed* in commit `4c49887`. No `DeviceOrientationEvent` code exists.
-  - Tells the reader to open `chunky-matrix.html` — renamed to
-    `index.html` in commit `9570d49`.
-  - Doesn't mention the boot sequence at all, which is now most of the
-    file and most of the recent commit history.
-  - Byline says "Browser port by Claude Sonnet 4.6" — stale.
-  - Doesn't mention any of the mobile/DPR/sizing work either, obviously.
-  - **Do not trust README.md as a description of current behavior.**
+Nothing currently known. README.md was rewritten this session (commit
+`d04cab2`) — describes the boot sequence, unified canvas, character
+pools, palette controls, responsive sizing, DPR handling,
+`ResizeObserver`, and `?debug=1`. If you change any of that in `index.html`
+going forward, update README.md in the same commit — it's accurate now,
+keep it that way rather than letting it drift stale again.
 
 ## Settled decisions (don't re-litigate)
 
@@ -360,7 +399,9 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
   is fine, overflow past the edge is not.
 - `#colour-hint` lives inside `#c64-screen-wrapper` as `position:absolute`
   — don't move it back to a viewport-fixed position, that's what caused
-  the HUD collision on mobile.
+  the HUD collision on mobile. Keep its backing plate
+  (`background`+`padding`) too — without one it's unreadable over the
+  rain it renders on top of, confirmed on a real device.
 - Band-sync is genuinely experimental — don't treat the v1 constants as
   final without feedback.
 - This session's browser pane can serve stale `screenshot` composites for
@@ -370,29 +411,28 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
 
 ## Outstanding questions for PAUL-ERIC
 
-1. **Load `https://polerix.github.io/ChunkyMatrix/?debug=1` on the iPhone
-   17 Pro again** (both orientations, after rotating at least once so the
-   ResizeObserver path actually gets exercised) and report back the
-   numbers, or just whether it visually looks right. Round 3 fixes the
-   exact defect round 2's device readout proved existed; it has not been
-   re-confirmed on-device yet.
-2. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
-   from round 1) — acceptable, or keep desktop chunkier?
-3. **Band-sync v1** — keep, retune, or scrap for a different shape?
+Both explicitly undecided — do not act on either without his say-so:
+
+1. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
+   from round 1's universal 22-char-header floor) — acceptable as-is, or
+   does he want desktop kept chunkier even at the cost of the floor not
+   scaling perfectly smoothly across all widths?
+2. **Band-sync v1** (commit `da4c4fe`) — keep, retune the constants
+   (frame scale `0.05`, phase spacing `PI/2`, crest threshold `0.82`), or
+   scrap for a different shape entirely? Live on the deployed site now,
+   never explicitly reviewed.
 
 ## Immediate next steps
 
-1. Verify GitHub Pages redeployed `05645c6` and the live URL serves it
-   byte-for-byte (same method as prior pushes: build-status API + curl
-   diff against local HEAD) — not yet done this pass.
-2. Get PAUL-ERIC's on-device confirmation (see above) before considering
-   the mobile bug closed. Given the round 1→2 track record, a THIRD
-   "looks fixed in emulation" claim without device confirmation should
-   carry zero weight on its own.
-3. **Rewrite README.md** — next in queue, not started. Should now also
-   describe the responsive sizing, DPR handling, ResizeObserver-driven
-   layout, and `?debug=1`.
-4. Decide on Git LFS for the two large binaries — not urgent, flagged.
+1. Verify GitHub Pages redeployed this session's final commit and the
+   live URL serves it byte-for-byte (build-status API + curl diff against
+   local HEAD, same method as every prior push this project) — not yet
+   done for the last few commits (hint-plate fix, README rewrite, this
+   file). Do that first, before anything else.
+2. Nothing else is queued. The mobile bug is closed, README is current.
+   Next work is whichever of the two open questions above PAUL-ERIC
+   decides on, or Git LFS for the two large binaries (font `.ttf`,
+   soundtrack `.mp4` — not urgent, flagged, never blocking).
 
-Don't start any of these without checking in — this file is a snapshot,
-not a plan.
+Don't start new work without checking in — this file is a snapshot, not
+a plan.
