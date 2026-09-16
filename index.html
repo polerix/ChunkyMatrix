@@ -31,7 +31,14 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 }
 
 #matrix-cvs {
-  position:absolute; inset:0;
+  /* Canvas is a replaced element — inset:0 alone does NOT stretch it to
+     fill the container; without explicit width/height it falls back to
+     its intrinsic size, which for canvas is its width/height ATTRIBUTES.
+     Those attributes are set to CSS_W*devicePixelRatio in JS (the backing
+     store), so without this, the on-screen box became devicePixelRatio×
+     too large on any HiDPI screen, clipped by this wrapper's
+     overflow:hidden — exactly the real-device mobile bug. */
+  position:absolute; inset:0; width:100%; height:100%;
 }
 
 /* Control strip in the frame */
@@ -132,6 +139,57 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   const cbInv = document.getElementById('cb-inv');
   const cbSnd = document.getElementById('cb-snd');
 
+  // ── Debug overlay (?debug=1) ─────────────────────────────────────
+  // On-screen readout of every width/height signal the layout math touches,
+  // so a real device can report ground truth in one round trip instead of
+  // guessing from emulation (which has already proven unreliable for this
+  // class of bug — emulated Chrome measured 24-34 columns on a viewport
+  // where a real iPhone Safari was visibly rendering ~7-10). Zero effect
+  // on normal (non-debug) page loads.
+  const DEBUG = /[?&]debug=1(?:&|$)/.test(location.search);
+  let debugEl = null;
+  if (DEBUG) {
+    debugEl = document.createElement('div');
+    debugEl.id = 'debug-overlay';
+    debugEl.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99999;'+
+      'background:rgba(0,0,0,0.88);color:#7CFC7C;'+
+      'font:10px/1.5 -apple-system,monospace;padding:6px 8px;'+
+      'white-space:pre-wrap;pointer-events:none;'+
+      'max-height:60vh;overflow:auto;';
+    document.body.appendChild(debugEl);
+  }
+
+  function updateDebugOverlay(){
+    if (!DEBUG || !debugEl) return;
+    const wrapEl = document.getElementById('c64-screen-wrapper');
+    const wr = wrapEl.getBoundingClientRect();
+    const cvsRect = cvs.getBoundingClientRect();
+    const vv = window.visualViewport;
+    const lines = [
+      `devicePixelRatio: ${window.devicePixelRatio}`,
+      `window.innerWidth/Height: ${window.innerWidth} / ${window.innerHeight}`,
+      `documentElement.clientWidth/Height: ${document.documentElement.clientWidth} / ${document.documentElement.clientHeight}`,
+      `visualViewport: ${vv ? `${vv.width.toFixed(1)} x ${vv.height.toFixed(1)} (scale=${vv.scale}, offsetLeft=${vv.offsetLeft.toFixed(1)}, offsetTop=${vv.offsetTop.toFixed(1)})` : 'unsupported'}`,
+      `#c64-screen-wrapper getBoundingClientRect: ${wr.width.toFixed(1)} x ${wr.height.toFixed(1)}`,
+      `#c64-screen-wrapper clientWidth/Height: ${wrapEl.clientWidth} / ${wrapEl.clientHeight}`,
+      `#matrix-cvs getBoundingClientRect (CSS size on screen): ${cvsRect.width.toFixed(1)} x ${cvsRect.height.toFixed(1)}`,
+      `#matrix-cvs backing store (cvs.width/height): ${cvs.width} x ${cvs.height}`,
+      `CSS_W/CSS_H (what resize() measured): ${CSS_W.toFixed(1)} / ${CSS_H.toFixed(1)}`,
+      `CELL_W/CELL_H: ${CELL_W} / ${CELL_H}`,
+      `FONT_PX: ${FONT_PX}`,
+      `COLS/ROWS: ${COLS} / ${ROWS}`,
+      `COLS*CELL_W (total content width): ${COLS*CELL_W} vs canvas CSS width ${cvsRect.width.toFixed(1)}`,
+      `orientation: ${screen.orientation ? screen.orientation.type : 'n/a'}`,
+      `bootState: ${bootState}`,
+    ];
+    debugEl.textContent = lines.join('\n');
+  }
+  // iOS Safari doesn't always fire 'resize' when the address bar collapses
+  // or the visual viewport otherwise changes without a layout viewport
+  // change — poll while debug mode is on so the readout can't go stale.
+  if (DEBUG) setInterval(updateDebugOverlay, 1000);
+
   // ── Character sets ────────────────────────────────────────────────
   const EN_CHARS    = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
   const ZH_CHARS    = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ' +
@@ -159,6 +217,9 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let cursorOn=true, lastCursorToggle=0;
   let loadDuration=0, matrixActive=false;
   let CMD_ROW=9, SEARCH_ROW=12;
+  // Boot-text row positions — adaptive, see computeBootRows(). Defaults
+  // are the authentic spacing, used whenever ROWS is tall enough for it.
+  let ROW_HEADER=2, ROW_RAM=5, ROW_READY=7;
   // PETSCII linear sweep state
   let chaosPos=0, chaosTotal=0, chaosBatch=0;
   // rain wave-band frame counter
@@ -184,10 +245,43 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   // 320px-wide phone after frame padding eats into it; ceiling of 34 keeps
   // cells "chunky" (this is Chunky Matrix) instead of shrinking to normal
   // terminal density on a large desktop window.
-  function chunkSize(W){
+  // H constrains the same cw: a short (landscape) viewport sized purely
+  // from width can end up with a cell tall enough that ROWS drops below
+  // what the boot screen needs (its fixed-looking rows go through
+  // computeBootRows() below, but they still need SOME minimum headroom)
+  // and rain rows get clipped by the controls row. MIN_ROWS=14 comfortably
+  // covers the 10-row authentic boot layout with margin.
+  function chunkSize(W,H){
     const targetCols=Math.max(24,Math.min(34,Math.round(W/16)));
-    const cw=Math.max(9,Math.floor(W/targetCols));
+    let cw=Math.max(9,Math.floor(W/targetCols));
+    // 16, not 10: the derived SEARCH_ROW/loadRow (searching/loading states,
+    // computed from CMD_ROW in resize()) can land 1-2 rows past CMD_ROW
+    // when COLS is at the low end of its clamp — 16 keeps those in bounds
+    // too, not just the header/64K/READY/CMD rows computeBootRows() covers.
+    const MIN_ROWS=16;
+    if(H/Math.round(cw*1.28)<MIN_ROWS){
+      cw=Math.max(9,Math.floor((H/MIN_ROWS)/1.28));
+    }
     return {cw, ch:Math.round(cw*1.28)};
+  }
+
+  // Boot-text row positions. The authentic C64 spacing (2 blank lines
+  // between header and "64K RAM SYSTEM", etc.) needs 10 rows (0-9); a
+  // short landscape-phone viewport can have far fewer even after the
+  // height constraint above. Compress proportionally instead of using
+  // fixed rows that silently render below the visible area — that's what
+  // made a short landscape boot screen show almost nothing but the header.
+  function computeBootRows(){
+    const AUTHENTIC_ROWS_NEEDED=10; // CMD_ROW=9 is the last one, 0-indexed
+    if(ROWS>=AUTHENTIC_ROWS_NEEDED){
+      ROW_HEADER=2; ROW_RAM=5; ROW_READY=7; CMD_ROW=9;
+      return;
+    }
+    const last=Math.max(3,ROWS-1);
+    ROW_HEADER=0;
+    ROW_RAM=Math.max(1,Math.round(last/3));
+    ROW_READY=Math.max(ROW_RAM+1,Math.round(last*5/9));
+    CMD_ROW=Math.max(ROW_READY+1,last);
   }
 
   function applyFont(){
@@ -206,15 +300,20 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     const wr=document.getElementById('c64-screen-wrapper').getBoundingClientRect();
     if(wr.width<1||wr.height<1) return false;
     CSS_W=wr.width; CSS_H=wr.height;
-    const {cw,ch}=chunkSize(CSS_W);
+    const {cw,ch}=chunkSize(CSS_W,CSS_H);
     CELL_W=cw; CELL_H=ch;
     FONT_PX=Math.max(8,Math.floor(cw*0.86));
     // Canvas backing store is sized in device pixels (CSS px * DPR) so text
-    // renders crisp on a HiDPI/Retina screen instead of soft/blurry — the
-    // element's on-screen CSS size still comes from #matrix-cvs{inset:0}
-    // filling the wrapper, unaffected by these attribute values. All draw
-    // calls keep using CSS-px coordinates (CELL_W/H, CSS_W/H, etc.); the
-    // transform below scales them into the higher-res backing store.
+    // renders crisp on a HiDPI/Retina screen instead of soft/blurry. The
+    // element's on-screen CSS size comes from #matrix-cvs{inset:0; width:
+    // 100%; height:100%} filling the wrapper — the explicit width/height
+    // are required: canvas is a replaced element, so inset:0 ALONE does
+    // not stretch it to fill the container, it falls back to its
+    // intrinsic size (its width/height attributes below), which would
+    // make the on-screen box devicePixelRatio× too large, clipped by this
+    // wrapper's overflow:hidden. All draw calls keep using CSS-px
+    // coordinates (CELL_W/H, CSS_W/H, etc.); the transform below scales
+    // them into the higher-res backing store.
     const dpr=window.devicePixelRatio||1;
     cvs.width =Math.round(CSS_W*dpr);
     cvs.height=Math.round(CSS_H*dpr);
@@ -225,9 +324,11 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     ctx.fillStyle=bg();
     ctx.fillRect(0,0,CSS_W,CSS_H);
     initColumns();
+    computeBootRows();
     // Recompute boot row positions after resize
     const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
     SEARCH_ROW=CMD_ROW+wrapRows+1;
+    updateDebugOverlay();
     return true;
   }
 
@@ -285,19 +386,15 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     frame.style.background=fCol();
     clearGrid();
     const LB=PALETTE[14]; // light blue for text
-    // Authentic C64 layout:
-    //   rows 0-1: blank
-    //   row  2  : **** header **** (centred)
-    //   rows 3-4: blank  (2 blank lines between header and 64K)
-    //   row  5  : 64K RAM SYSTEM
-    //   row  6  : blank
-    //   row  7  : READY.
-    //   rows 8  : blank
-    //   row  9  : CMD_ROW — cursor blinks here before typing
+    // Authentic C64 layout when ROWS>=10 (2 blank lines between header and
+    // 64K, etc — rows 2/5/7/9); compressed proportionally on a shorter
+    // viewport instead — see computeBootRows(), called from resize()
+    // before this runs, so ROW_HEADER/ROW_RAM/ROW_READY/CMD_ROW are
+    // already set for the current ROWS.
     const headerStr='**** C64 BASIC V2 ****';
-    printLine(Math.floor((COLS-headerStr.length)/2),2,headerStr,LB);
-    printLine(0,5,'64K RAM SYSTEM',LB);
-    printLine(0,7,'READY.',LB);
+    printLine(Math.floor((COLS-headerStr.length)/2),ROW_HEADER,headerStr,LB);
+    printLine(0,ROW_RAM,'64K RAM SYSTEM',LB);
+    printLine(0,ROW_READY,'READY.',LB);
     drawCh(0,CMD_ROW,'█',LB);        // cursor before LOAD cmd
     bootState='waiting';              // ~1Hz blink pause before typing
     stateStart=performance.now();
