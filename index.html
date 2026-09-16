@@ -185,8 +185,13 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     ctx.imageSmoothingEnabled=false;
   }
 
+  // Returns false if the wrapper hasn't been laid out yet (0×0 rect — can
+  // happen right when the font promise resolves, before the first layout
+  // pass). Callers must not touch COLS/ROWS/grid on a false return, or a
+  // 0/0 division leaves COLS/ROWS as NaN and the grid empty.
   function resize(){
     const wr=document.getElementById('c64-screen-wrapper').getBoundingClientRect();
+    if(wr.width<1||wr.height<1) return false;
     const {cw,ch}=chunkSize();
     CELL_W=cw; CELL_H=ch;
     FONT_PX=Math.max(8,Math.floor(cw*0.86));
@@ -201,6 +206,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     // Recompute boot row positions after resize
     const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
     SEARCH_ROW=CMD_ROW+wrapRows+1;
+    return true;
   }
 
   // ── Grid drawing ──────────────────────────────────────────────────
@@ -216,7 +222,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   // Draw a single character into a grid cell
   function drawCh(col,row,ch,color){
-    if(col<0||col>=COLS||row<0||row>=ROWS) return;
+    if(!(col>=0&&col<COLS&&row>=0&&row<ROWS)) return;
     const px=col*CELL_W, py=row*CELL_H;
     ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
     grid[col][row]=ch;
@@ -265,7 +271,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   // ── Sprites ───────────────────────────────────────────────────────
   function drawSprite(c,r,color,si){
-    if(c<0||c>=COLS||r<0||r>=ROWS) return;
+    if(!(c>=0&&c<COLS&&r>=0&&r<ROWS)) return;
     const bmp=SPRITES[si%SPRITES.length];
     const px=c*CELL_W, py=r*CELL_H;
     ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
@@ -308,7 +314,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   }
 
   function drawCell(c,r,ch,color){
-    if(c<0||c>=COLS||r<0||r>=ROWS) return;
+    if(!(c>=0&&c<COLS&&r>=0&&r<ROWS)) return;
     const px=c*CELL_W, py=r*CELL_H;
     ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
     grid[c][r]=ch;
@@ -320,7 +326,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   }
 
   function recolour(c,r,color){
-    if(c<0||c>=COLS||r<0||r>=ROWS) return;
+    if(!(c>=0&&c<COLS&&r>=0&&r<ROWS)) return;
     const ch=grid[c][r];
     if(ch===' ') return;
     const si=INV_SENTINELS.indexOf(ch);
@@ -524,13 +530,19 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   // fillText warm-up then forces a real rasterise pass so the very first
   // visible character (the 'L' in 'LOAD') is guaranteed to use the bitmap
   // font rather than the system monospace fallback.
-  document.fonts.load("bold 18px 'BoutiqueBitmap9x9'").then(()=>{
-    resize();
+  // resize() can legitimately fail the first time it's called here (0×0
+  // wrapper rect — the font promise sometimes resolves before the first
+  // layout pass, especially on a warm font cache). Retry on the next
+  // animation frame instead of booting with a corrupt COLS/ROWS/grid.
+  function startWhenLaidOut(){
+    if(!resize()){ requestAnimationFrame(startWhenLaidOut); return; }
     // Warm-up: force glyph decode before any visible character is drawn
     ctx.fillText('A', -100, -100);
     startBoot();
     requestAnimationFrame(tick);
-  });
+  }
+
+  document.fonts.load("bold 18px 'BoutiqueBitmap9x9'").then(startWhenLaidOut);
 
 })();
 </script>
