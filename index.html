@@ -57,6 +57,16 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   clip-path:polygon(20% 50%,40% 75%,80% 20%,80% 30%,40% 85%,20% 60%);
 }
 .ctrl-div { color:rgba(160,160,220,.4); }
+/* prevent scroll-cancel on hold gestures */
+#matrix-cvs { touch-action: none; }
+/* discoverable tap-zone hint */
+#colour-hint {
+  position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+  font-family:'Press Start 2P',monospace; font-size:clamp(5px,1.4vw,8px);
+  color:rgba(148,224,137,0.85);
+  white-space:nowrap; pointer-events:none; z-index:20;
+  transition:opacity 1.5s; opacity:0;
+}
 </style>
 </head>
 <body>
@@ -74,6 +84,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     <label title="Sound on/off"><input type="checkbox" id="cb-snd" checked> SND</label>
   </div>
 </div>
+<div id="colour-hint">tap glyph &middot; tap space &middot; tap frame &nbsp;|&nbsp; hold = fast-cycle</div>
 <audio id="snd" src="soundtrack.mp4" loop preload="auto"></audio>
 <script>
 'use strict';
@@ -142,7 +153,11 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let typingPos=0, lastTypeTime=0;
   let cursorOn=true, lastCursorToggle=0;
   let loadDuration=0, matrixActive=false;
-  let CMD_ROW=6, SEARCH_ROW=9;
+  let CMD_ROW=9, SEARCH_ROW=12;
+  // PETSCII linear sweep state
+  let chaosPos=0, chaosTotal=0, chaosBatch=0;
+  // rain wave-band frame counter
+  let rainFrame=0;
   const LOAD_CMD    = 'LOAD "CHUNKY-MATRIX",8,1';
   const TYPE_DELAY  = 130; // ms per keystroke
 
@@ -182,8 +197,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     applyFont();
     ctx.fillStyle=bg();
     ctx.fillRect(0,0,cvs.width,cvs.height);
-    grid=Array.from({length:COLS},()=>new Array(ROWS).fill(' '));
-    columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
+    initColumns();
     // Recompute boot row positions after resize
     const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
     SEARCH_ROW=CMD_ROW+wrapRows+1;
@@ -230,14 +244,23 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     frame.style.background=fCol();
     clearGrid();
     const LB=PALETTE[14]; // light blue for text
+    // Authentic C64 layout:
+    //   rows 0-1: blank
+    //   row  2  : **** header **** (centred)
+    //   rows 3-4: blank  (2 blank lines between header and 64K)
+    //   row  5  : 64K RAM SYSTEM
+    //   row  6  : blank
+    //   row  7  : READY.
+    //   rows 8  : blank
+    //   row  9  : CMD_ROW — cursor blinks here before typing
     const headerStr='**** C64 BASIC V2 ****';
-    printAt(Math.floor((COLS-headerStr.length)/2),0,headerStr,LB);
-    printAt(0,2,'64K RAM SYSTEM',LB);
-    printAt(0,4,'READY.',LB);
+    printAt(Math.floor((COLS-headerStr.length)/2),2,headerStr,LB);
+    printAt(0,5,'64K RAM SYSTEM',LB);
+    printAt(0,7,'READY.',LB);
     drawCh(0,CMD_ROW,'█',LB);        // cursor before LOAD cmd
-    bootState='typing';
+    bootState='waiting';              // ~1Hz blink pause before typing
     stateStart=performance.now();
-    typingPos=0; lastTypeTime=0;
+    cursorOn=true; lastCursorToggle=performance.now();
   }
 
   // ── Sprites ───────────────────────────────────────────────────────
@@ -276,7 +299,12 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   function makeColumn(x){
     const sp=(Math.random()*4|0)+1;
-    return{x,row:Math.random()*ROWS|0,speed:sp,delay:sp,len:(Math.random()*16|0)+6};
+    return{x,row:Math.random()*ROWS|0,speed:sp,delay:sp,len:(Math.random()*16|0)+6,band:x%4};
+  }
+
+  function initColumns(){
+    grid=Array.from({length:COLS},()=>new Array(ROWS).fill(' '));
+    columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
   }
 
   function drawCell(c,r,ch,color){
@@ -304,9 +332,14 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   }
 
   function updateMatrix(){
+    rainFrame++;
     for(let x=0;x<COLS;x++){
       const col=columns[x];
-      if(--col.delay>0) continue;
+      // Wave-band: columns in the same band share a phase; the crest gives
+      // them an occasional extra tick so they surge together like a wave.
+      const waveBoost=Math.sin(rainFrame*0.05-col.x*0.25)>0.82?1:0;
+      col.delay=Math.max(0,col.delay-1-waveBoost);
+      if(col.delay>0) continue;
       col.delay=col.speed; col.row++;
       if(col.row-col.len>=ROWS){
         col.row=0; col.speed=(Math.random()*4|0)+1;
@@ -330,7 +363,19 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     const elapsed=now-stateStart;
     const LB=PALETTE[14];
 
-    if(bootState==='typing'){
+    if(bootState==='waiting'){
+      // ~1 Hz cursor blink before the user "types" LOAD
+      if(now-lastCursorToggle>500){
+        cursorOn=!cursorOn; lastCursorToggle=now;
+        drawCh(0,CMD_ROW,cursorOn?'█':' ',LB);
+      }
+      if(elapsed>1500){
+        cursorOn=false; drawCh(0,CMD_ROW,' ',LB);
+        bootState='typing'; stateStart=now;
+        typingPos=0; lastTypeTime=now;
+      }
+
+    } else if(bootState==='typing'){
       // Cursor blink
       if(now-lastCursorToggle>350){
         cursorOn=!cursorOn; lastCursorToggle=now;
@@ -364,24 +409,28 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       if(elapsed>1600){
         const loadRow=SEARCH_ROW+Math.ceil(28/COLS)+1;
         printAt(0,loadRow,'LOADING',LB);
-        bootState='loading'; stateStart=now;
         loadDuration=randRange(3500,8000);
+        // set up linear PETSCII sweep
+        chaosPos=0; chaosTotal=COLS*ROWS;
+        // batch size: complete the sweep in ~loadDuration ms at ~60 fps
+        chaosBatch=Math.max(2,Math.ceil(chaosTotal/(loadDuration/1000*60)));
+        bootState='loading'; stateStart=now;
       }
 
     } else if(bootState==='loading'){
-      // PETSCII chaos — fill random chunky cells in random C64 colours
-      const writes=randInt(8,20);
-      for(let w=0;w<writes;w++){
-        const c=Math.floor(Math.random()*COLS);
-        const r=Math.floor(Math.random()*ROWS);
+      // PETSCII chaos — linear sweep top-left → bottom-right (address order)
+      const end=Math.min(chaosPos+chaosBatch,chaosTotal);
+      for(let i=chaosPos;i<end;i++){
+        const c=i%COLS, r=Math.floor(i/COLS);
         const ch=NOISE_CHARS[Math.floor(Math.random()*NOISE_CHARS.length)];
         drawCh(c,r,ch,PALETTE[Math.floor(Math.random()*16)]);
       }
-      if(elapsed>loadDuration){
+      chaosPos=end;
+      if(chaosPos>=chaosTotal){
         clearGrid();
         printAt(0,1,'READY.',LB);
         drawCh(0,3,'█',LB);
-        bootState='ready'; stateStart=now; cursorOn=true;
+        bootState='ready'; stateStart=now; cursorOn=true; lastCursorToggle=now;
       }
 
     } else if(bootState==='ready'){
@@ -397,10 +446,15 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       if(elapsed>2200){
         bootState='rain'; stateStart=now;
         matrixActive=true;
+        rainFrame=0;
         rebuildChars();
         clearGrid();
-        columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
+        initColumns();
         if(cbSnd.checked) snd.play().catch(()=>{});
+        // show discoverable hint, fade after 5 s
+        const hintEl=document.getElementById('colour-hint');
+        hintEl.style.opacity='1';
+        setTimeout(()=>{ hintEl.style.opacity='0'; },5000);
       }
 
     } else if(bootState==='rain'){
@@ -411,41 +465,55 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     }
   }
 
-  // ── Tap to cycle colours ─────────────────────────────────────────
-  // Tap a character → cycle Matrix head colour
-  // Tap empty area  → cycle background colour
-  // Tap frame border (outside screen) → cycle frame colour
-  cvs.addEventListener('click', e=>{
-    if(!matrixActive) return;
-    const c=Math.floor(e.offsetX/CELL_W);
-    const r=Math.floor(e.offsetY/CELL_H);
-    const ch=(c>=0&&c<COLS&&r>=0&&r<ROWS)?grid[c][r]:' ';
-    if(ch!==' '&&!INV_SENTINELS.includes(ch)){
-      headIdx=(headIdx+1)%16;
-    } else {
-      bgIdx=(bgIdx+1)%16;
-      fillBg();
-    }
-  });
+  // ── Tap / hold to cycle colours ──────────────────────────────────
+  // Short tap: single step.  Hold >500 ms: fast-cycle at 150 ms/step.
+  // Tap glyph → head colour | tap empty → bg colour | tap frame → frame colour
+  let holdTimer=null, cycleTimer=null, pointerTarget=null;
 
-  frame.addEventListener('click', e=>{
+  function cancelHold(){ clearTimeout(holdTimer); holdTimer=null; clearInterval(cycleTimer); cycleTimer=null; }
+  function doCycle(){
+    if(pointerTarget==='head') { headIdx=(headIdx+1)%16; }
+    else if(pointerTarget==='bg')   { bgIdx=(bgIdx+1)%16; fillBg(); }
+    else if(pointerTarget==='frame'){ frameIdx=(frameIdx+1)%16; frame.style.background=fCol(); }
+  }
+  function armHold(target){
+    pointerTarget=target;
+    holdTimer=setTimeout(()=>{ holdTimer=null; doCycle(); cycleTimer=setInterval(doCycle,150); },500);
+  }
+
+  cvs.addEventListener('pointerdown', e=>{
     if(!matrixActive) return;
-    if(e.target.closest('#c64-screen-wrapper')) return;
-    if(e.target.closest('#c64-controls')) return;
-    frameIdx=(frameIdx+1)%16;
-    frame.style.background=fCol();
+    const c=Math.floor(e.offsetX/CELL_W), r=Math.floor(e.offsetY/CELL_H);
+    const ch=(c>=0&&c<COLS&&r>=0&&r<ROWS)?grid[c][r]:' ';
+    armHold((ch!==' '&&!INV_SENTINELS.includes(ch))?'head':'bg');
   });
+  cvs.addEventListener('pointerup', e=>{
+    if(!matrixActive) return;
+    if(cycleTimer){ cancelHold(); return; }
+    if(holdTimer){ cancelHold(); doCycle(); }
+  });
+  cvs.addEventListener('pointercancel', cancelHold);
+
+  frame.addEventListener('pointerdown', e=>{
+    if(!matrixActive) return;
+    if(e.target.closest('#c64-screen-wrapper')||e.target.closest('#c64-controls')) return;
+    armHold('frame');
+  });
+  frame.addEventListener('pointerup', e=>{
+    if(!matrixActive) return;
+    if(e.target.closest('#c64-screen-wrapper')||e.target.closest('#c64-controls')) return;
+    if(cycleTimer){ cancelHold(); return; }
+    if(holdTimer){ cancelHold(); doCycle(); }
+  });
+  frame.addEventListener('pointercancel', cancelHold);
 
   // ── Checkbox listeners ────────────────────────────────────────────
   [cbZh,cbEn,cbInv].forEach(cb=>cb.addEventListener('change',rebuildChars));
   cbSnd.addEventListener('change',()=>{ cbSnd.checked?snd.play().catch(()=>{}):snd.pause(); });
-  document.addEventListener('click',()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); },{once:true});
+  document.addEventListener('pointerdown',()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); },{once:true});
 
   window.addEventListener('resize',()=>{
-    resize();
-    if(bootState==='rain'){
-      columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
-    }
+    resize(); // resize() calls initColumns() — no extra work needed
   },{passive:true});
 
   // ── Start — wait for fonts ────────────────────────────────────────
