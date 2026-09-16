@@ -4,7 +4,8 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes).
+> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes,
+> real-device mobile bug round 2 + debug overlay).
 
 ## What this is
 
@@ -41,23 +42,40 @@ column per step).
 - **Font**: self-hosted `BoutiqueBitmap9x9_Bold.ttf` (checked into repo,
   ~2.1MB), loaded via `document.fonts.load()` before boot starts, with an
   off-screen warm-up `fillText` to force glyph rasterization.
-- **Sizing**: `chunkSize(W)` takes the drawable width in CSS px (the
-  `#c64-screen-wrapper` rect, not `window.innerWidth`) and derives cell
-  width from a target column count that scales with `W`, clamped to
-  `[24, 34]` columns — guarantees the 22-char boot header always fits with
-  margin at any width down to 320px, while staying "chunky" (not shrinking
-  to normal terminal density) on a large desktop window. Rewritten this
-  session — see mobile fixes below for why the old flat-divisor formula
-  broke on real phones.
+- **Sizing**: `chunkSize(W,H)` takes the drawable width AND height in CSS
+  px (the `#c64-screen-wrapper` rect, not `window.innerWidth`) and derives
+  cell width from a target column count that scales with `W`, clamped to
+  `[24, 34]` columns, THEN shrinks further if needed so height still gives
+  at least `MIN_ROWS=16` rows (a short landscape viewport sized purely
+  from width could otherwise starve `ROWS`). Guarantees the 22-char boot
+  header always fits with margin at any width down to 320px and any
+  height down to ~250px tested, while staying "chunky" (not shrinking to
+  normal terminal density) on a large desktop window.
+- **Boot row layout**: `computeBootRows()` sets `ROW_HEADER`/`ROW_RAM`/
+  `ROW_READY`/`CMD_ROW` from `ROWS` — the authentic spacing (rows 2/5/7/9)
+  when `ROWS>=10`, compressed proportionally otherwise. Was hardcoded
+  literals before this session; that's what made a short landscape boot
+  screen render almost nothing (fixed rows fell outside `ROWS` and
+  silently didn't draw — `drawCh` bounds-checks and no-ops out of range).
 - **DPR handling**: `resize()` sizes the canvas *backing store* to CSS px
-  × `devicePixelRatio` and applies `ctx.setTransform(dpr,0,0,dpr,0,0)`, so
-  all drawing (still done in CSS-px coordinates everywhere else in the
-  file) renders crisp on HiDPI/Retina screens. Added this session — there
-  was previously no DPR handling at all. `CSS_W`/`CSS_H` module vars hold
-  the CSS-px drawable size; don't use `cvs.width`/`cvs.height` for draw
-  math, those are now device-pixel values.
+  × `devicePixelRatio` and applies `ctx.setTransform(dpr,0,0,dpr,0,0)` —
+  the ONLY place DPR enters the picture; everything else (`CELL_W/H`,
+  `CSS_W/H`, all draw coordinates) stays in CSS px. `#matrix-cvs` also
+  needs explicit `width:100%; height:100%` in CSS alongside `inset:0` —
+  canvas is a replaced element, so `inset:0` alone does NOT stretch it to
+  fill its container; without the explicit size it falls back to its
+  *intrinsic* size, which for canvas is its width/height ATTRIBUTES (the
+  DPR-scaled backing store!), making the on-screen box `devicePixelRatio`×
+  too large. This was the real bug behind the "still broken on a real
+  iPhone" report — see below, don't remove that CSS rule.
 - `resize()` returns `false` and touches no state if the wrapper is still
   a 0×0 rect (see crash-fix section below) — callers must check this.
+- **`?debug=1`**: on-screen readout (top of viewport) of every width/
+  height signal in the layout chain — devicePixelRatio, innerWidth/Height,
+  visualViewport, wrapper rect + clientWidth, canvas CSS size vs backing
+  store, CELL_W/H, COLS/ROWS, bootState. Polls every 1s (iOS doesn't
+  always fire `resize` on address-bar collapse). Zero effect without the
+  query param. Permanent diagnostic tool, not a one-off — keep it.
 - **Rain**: each column is `{x, row, speed, delay, len, band}`. `band` is
   `x % 4` (4 groups); `updateMatrix()` gives each band an identical phase
   offset so columns in the same band crest together — a real synced-wave
@@ -79,92 +97,81 @@ column per step).
 
 README.md does not track any of this — see "Known stale" below.
 
-## Current status: live site is fixed and pushed
+## Current status: fix #2 pushed, NOT yet confirmed on the real device
 
-`origin/main` is at `0d96c48`. GitHub Pages redeployed and was verified
-serving that exact commit. Confirmed live, end to end:
-- Boot-freeze crash: fixed, verified (full boot→rain cycle, zero console
-  errors, both locally and on the actual deployed URL).
-- Mobile overflow (giant glyphs, ~5-col rain, HUD collision): fixed and
-  verified locally at 320/375/390/414/430 CSS px, portrait + landscape,
-  DPR 2 (real) and DPR 3 (see caveat below) — **not yet re-verified on the
-  live URL after push; do that before considering this fully closed.**
+`origin/main` is at `78822a5`. GitHub Pages redeploy not yet verified in
+this pass — do that next (see "Immediate next steps"). This is the
+**second** attempt at the mobile bug; the first attempt (`c19602d`/
+`0d96c48`, "fixed and verified" in an earlier version of this file) was
+**wrong** — PAUL-ERIC tested it on his actual iPhone 17 Pro (iOS 26, DPR
+3, both Safari and Chrome) and it was still broken, in both orientations.
+That earlier "verified" claim was emulation-only and the emulation was
+hiding the real bug (see below). **Don't trust emulated verification
+alone for this bug class — load `?debug=1` on the actual device.**
 
-## Fixed this session (part 2): mobile overflow — DPR + responsive sizing + HUD
+## Fixed this session (round 2): the REAL mobile bug — canvas box sizing
 
-PAUL-ERIC tested on a real iPhone (Safari, 390pt CSS width, DPR 3) after
-the first round of fixes shipped, and it was unusable: ~7 giant glyphs
-spanning the header, ~5-column rain, and the colour-hint text overlapping
-the CJK/ABC/SIG/SND controls row. His strong suspicion was a DPR bug.
+Round 1 (`c19602d`) fixed a genuine bug (flat desktop-tuned cell-size
+divisor) but introduced DPR-scaling for the canvas backing store
+(`cvs.width = CSS_W * devicePixelRatio`) without realizing that alone
+creates a NEW, worse bug: **`#matrix-cvs` is a replaced element.**
+`position:absolute; inset:0;` does NOT stretch a replaced element to fill
+its container — without explicit `width`/`height` in CSS, it falls back
+to its *intrinsic* size, which for `<canvas>` is its width/height
+**attributes**. Those attributes were now the DPR-scaled backing store
+size, so the on-screen CSS box became `devicePixelRatio`× too large (2x
+at DPR2, 3x at DPR3), clipped by the wrapper's `overflow:hidden`. That's
+"double DPR" in effect — once correctly for backing-store resolution,
+once more (unintentionally) for the on-screen box — and it exactly
+explains all four of PAUL-ERIC's screenshots: header truncated (only the
+un-clipped fraction of an oversized, off-position render was visible),
+rain clipped mid-glyph past the right edge, landscape rows clipped by the
+HUD, landscape boot showing almost nothing (only the top-left corner of
+a 2-3x-oversized canvas was inside the visible wrapper).
 
-**Diagnosed DPR first, as asked, and it was a red herring for the size
-problem** (though a real, separate bug — see below). The actual cause:
-`chunkSize()` computed cell width as `Math.max(7, Math.floor(W/55))`
-columns, a flat ~55px-per-cell divisor. At `window.innerWidth=390`,
-`390/55=7.09` → exactly 7 columns — matches "~7 characters span the
-width" precisely, no DPR needed to explain it. This divisor was tuned for
-desktop browser windows (800-1200px) and never tested at real phone
-widths; it also read `window.innerWidth` instead of the actual drawable
-width (wrapper rect minus frame padding), which was already slightly
-wrong even before considering phones.
+**This also explains the false-pass in round 1's verification.** The
+"ink stripe" check read pixels from the canvas's own backing-store
+buffer via `getImageData` — internally self-consistent (the drawing
+*inside* the buffer was correct) but structurally blind to whether the
+canvas *element* was the right size on the page. It could never have
+caught this bug. Replaced it with a real geometric assertion: rendered
+cell pitch (`CELL_W`) × `COLS` checked against the canvas's actual
+on-screen CSS width, independently measured via `getBoundingClientRect`
+(not the app's own internal `CSS_W` — that would just check the app
+agrees with itself), same vertically, plus an explicit
+wrapper-bottom-above-controls-top check for HUD overlap. Confirmed this
+assertion actually discriminates (not a rubber stamp) by simulating the
+old bug (`width:auto;height:auto`) and watching it fail loudly before
+fixing it for real.
 
-**The DPR bug was real too, just not the cause of this specific symptom.**
-There was zero `devicePixelRatio` handling anywhere: the canvas backing
-store was sized 1:1 with CSS pixels regardless of screen density, so text
-would render soft/blurry on any 2x/3x display (would've been invisible on
-a 1x desktop monitor, which is presumably why it was never caught before
-real-phone testing).
+Fix (commit `78822a5`, full detail in the commit message):
+1. `#matrix-cvs { width:100%; height:100%; }` added alongside `inset:0` —
+   forces the CSS box to track the wrapper regardless of the backing-store
+   attribute values. This is the actual fix.
+2. `chunkSize(W,H)` now also constrains cell size by height
+   (`MIN_ROWS=16`), not just width — a short landscape viewport sized
+   purely from width could get a cell tall enough to starve `ROWS`.
+3. `computeBootRows()` makes boot row positions relative to `ROWS`
+   instead of hardcoded `2/5/7/9` — fixes the "landscape boot shows
+   almost nothing" report (those rows were silently out of bounds).
+4. Added `?debug=1` — see Architecture section above. Ship this
+   regardless of whether the CSS fix alone was sufficient; it's the tool
+   that will catch the *next* one of these.
 
-Three fixes, two commits (`c19602d` DPR+sizing, `0d96c48` HUD — see each
-commit message for full detail):
+**Verified in emulation** (Chrome, this session): geometric assertion
+passes at DPR 1/2/3 (DPR 2 real emulation; 1 and 3 via
+`Object.defineProperty(window,'devicePixelRatio',...)` + dispatched
+`resize` — same `resize()` code path, no DPR-specific branching to miss),
+portrait 393×852, landscape 852×393, and an extreme landscape 844×320.
+Zero console errors throughout. **Not yet confirmed on PAUL-ERIC's actual
+iPhone** — that's the next step, via `?debug=1`, not another round of
+emulated guessing.
 
-1. `chunkSize(W)` rewritten to target `[24,34]` columns scaling with the
-   actual wrapper width, guaranteeing the 22-char header fits with margin
-   at any tested width. **Disclosed side effect**: desktop cell size drops
-   from ~57px/14cols to roughly 30-40px/25-32cols — a universal floor that
-   fixes phones necessarily tightens desktop too, if scaling stays smooth.
-   Flagged, not separately confirmed with PAUL-ERIC yet.
-2. `resize()` now scales the canvas backing store by `devicePixelRatio`
-   and applies a matching `ctx` transform, so HiDPI screens get crisp text
-   instead of a blurry 1x bitmap stretched up.
-3. `#colour-hint` moved from `position:fixed` (viewport-relative,
-   collided with the controls row once mobile padding shrank the gap) to
-   `position:absolute` inside `#c64-screen-wrapper` — anchored to the
-   screen it describes, structurally can't reach the controls row below
-   it regardless of viewport size.
-
-**Verification caveat, important for future sessions**: this session's
-browser pane runs backgrounded (`document.hidden === true`), and partway
-through testing its `screenshot` tool was caught serving a **stale
-composite** of the canvas — a screenshot showed the header text cut off
-mid-word while a direct `ctx.getImageData()` pixel read of the *same
-loaded page, same moment* showed the full, correct, untruncated header
-rendered all the way across. Don't trust `computer.screenshot` alone on
-this pane for canvas-heavy verification; cross-check with direct state
-(here: reading the `grid` array via a temporary debug hook, and
-`ctx.getImageData` pixel sampling) before concluding something is broken.
-All verification in this section used those direct methods, not raw
-screenshots.
-
-**DPR 3 wasn't directly emulable** — the available `resize_window` tool
-ties DPR to a width<768 heuristic and always gives DPR 2 for phone-sized
-custom widths, with no explicit DPR override. Validated the DPR-3 path
-indirectly instead: confirmed the canvas backing-store math
-(`cvs.width = Math.round(CSS_W * dpr)`) has no DPR-value-specific branching
-— it's pure arithmetic on `window.devicePixelRatio` — then verified that
-arithmetic is correct at the real DPR-2 emulation (pixel-level, via
-`getImageData`) and again after overriding `window.devicePixelRatio` to 3
-and dispatching a `resize` event (confirmed `cvs.width` scaled by exactly
-3×). Reasonable confidence, but **not a substitute for someone actually
-checking on a real DPR-3 device** — PAUL-ERIC's iPhone is exactly that
-device; worth a quick recheck once he pulls the fix.
-
-Widths tested (portrait unless noted): 320, 375, 390 (his phone), 414,
-430; landscape 568×320 and 844×390 (the latter fell back to DPR 1 in the
-emulator due to the width<768 heuristic, not representative of a real
-device's landscape DPR — flagging, not a real risk since the DPR code
-path itself was separately validated above). Header fit and zero
-HUD-overlap confirmed at every size. Zero console errors throughout.
+**Earlier verification caveat, still true**: this session's browser pane
+runs backgrounded (`document.hidden === true`) and its `screenshot` tool
+has been caught serving a stale composite of canvas content. Prefer
+`getBoundingClientRect`/`getImageData`/direct state reads over
+screenshots when verifying canvas-rendered content in this environment.
 
 ## Fixed this session (part 1): boot-freeze crash (root cause)
 
@@ -235,13 +242,28 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
 - Boot single-line text (header, "64K RAM SYSTEM", "READY.") uses
   `printLine()` (truncates, never wraps) instead of `printAt()` (wraps) —
   keep using `printLine` for any new boot text landing on an exact row.
-- Cell sizing is now `chunkSize(W)` keyed off actual drawable width, target
-  column count clamped `[24,34]` — don't reintroduce a flat px-per-cell
-  divisor, that's exactly what broke on real phones.
+- Cell sizing is `chunkSize(W,H)` keyed off actual drawable width AND
+  height, target column count clamped `[24,34]`, height-constrained to
+  `MIN_ROWS=16` — don't reintroduce a flat px-per-cell divisor or a
+  width-only formula, both are exactly what broke on real phones.
 - Canvas backing store is DPR-scaled (`CSS_W/H * devicePixelRatio`); any
   new code drawing to the canvas should keep using CSS-px coordinates
   (`CELL_W`, `CSS_W`, etc.) — the `ctx` transform handles the rest. Don't
   read `cvs.width`/`cvs.height` for layout math, they're device-px now.
+- **`#matrix-cvs` MUST keep explicit `width:100%; height:100%` in CSS,
+  alongside `inset:0`.** Canvas is a replaced element — removing that rule
+  reintroduces the real mobile bug (on-screen box falls back to the
+  DPR-scaled backing-store attribute size, `devicePixelRatio`× too large).
+  This is not redundant with `inset:0`, don't "simplify" it away.
+- Boot row positions (`ROW_HEADER`/`ROW_RAM`/`ROW_READY`/`CMD_ROW`) are
+  set by `computeBootRows()` from `ROWS`, not hardcoded — needed for
+  short (landscape) viewports. Any new boot text with a fixed row should
+  go through something similar, not a bare literal.
+- Verify canvas/CSS-sizing bugs with a real geometric assertion (rendered
+  content size vs `getBoundingClientRect`, independently measured) — a
+  `getImageData`/ink-stripe check of the canvas's own buffer is blind to
+  on-screen box-size bugs by construction, proven by false-passing this
+  exact bug in round 1.
 - `#colour-hint` lives inside `#c64-screen-wrapper` as `position:absolute`
   — don't move it back to a viewport-fixed position, that's what caused
   the HUD collision on mobile.
@@ -254,21 +276,25 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
 
 ## Outstanding questions for PAUL-ERIC
 
-1. **Recheck the live site on your actual iPhone** once you pull — this
-   was verified thoroughly in emulation but DPR 3 specifically couldn't be
-   directly emulated (see caveat above). Should be fine, want it confirmed
-   on the real device that reported the bug.
-2. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols) —
-   acceptable, or do you want desktop kept chunkier even if that means the
-   universal 22-char floor isn't perfectly smooth across all widths?
+1. **Load `https://polerix.github.io/ChunkyMatrix/?debug=1` on the iPhone
+   17 Pro that reported the bug** (both orientations) and report back the
+   numbers, or just whether it visually looks right now. This is the
+   actual ground truth this whole round was about getting — everything
+   above is emulated, and emulation already misled once on this exact bug.
+2. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
+   from round 1) — acceptable, or keep desktop chunkier?
 3. **Band-sync v1** — keep, retune, or scrap for a different shape?
 
 ## Immediate next steps
 
-1. Confirm live site on a real phone (see above).
-2. **Rewrite README.md** — next in queue, not started. Should now also
-   describe the responsive sizing and DPR handling.
-3. Decide on Git LFS for the two large binaries — not urgent, flagged.
+1. Verify GitHub Pages redeployed `78822a5` and the live URL serves it
+   (byte-for-byte check + build-status API, same method as prior pushes)
+   — not yet done this pass.
+2. Get PAUL-ERIC's on-device confirmation (see above) before considering
+   the mobile bug closed.
+3. **Rewrite README.md** — next in queue, not started. Should now also
+   describe the responsive sizing, DPR handling, and `?debug=1`.
+4. Decide on Git LFS for the two large binaries — not urgent, flagged.
 
 Don't start any of these without checking in — this file is a snapshot,
 not a plan.
