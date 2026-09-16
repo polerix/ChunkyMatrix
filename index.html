@@ -117,7 +117,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   ];
   const BG_COLOR=6, BORDER_COLOR=14, TEXT_COLOR=14;
 
-  const NOISE_CHARS='█▓▒░▚▞▟▙▜▛▄▀▌▐■□▲▼◆◇●○♠♣♥♦☺☻@#%&*+=<>/\\|-_~^0123456789';
+  const NOISE_CHARS='\u2588\u2593\u2592\u2591\u259a\u259e\u259f\u2599\u259c\u259b\u2584\u2580\u258c\u2590\u25a0\u25a1\u25b2\u25bc\u25c6\u25c7\u25cf\u25cb\u2660\u2663\u2665\u2666\u263a\u263b@#%&*+=<>/\\|-_~^0123456789';
   const TEXT_CHARS ='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .:*_>-';
   const ALL_CHARS  =Array.from(new Set((NOISE_CHARS+TEXT_CHARS).split(''))).join('');
 
@@ -127,7 +127,6 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   const bctx=buf.getContext('2d');
   bctx.imageSmoothingEnabled=false;
 
-  // Loader canvas (inside screen-wrapper)
   const loader=document.getElementById('loader-cvs');
   const lctx=loader.getContext('2d');
   lctx.imageSmoothingEnabled=false;
@@ -168,7 +167,6 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   function hexToRgb(hex){const n=parseInt(hex.slice(1),16);return{r:(n>>16)&255,g:(n>>8)&255,b:n&255};}
 
-  // Pre-render glyph canvases for every char × color
   const glyphCache={};
   for(const ch of ALL_CHARS){
     const mask=buildMask(ch); glyphCache[ch]=[];
@@ -186,7 +184,6 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     }
   }
 
-  // Screen/color RAM
   const screenChar =new Array(COLS*ROWS).fill(' ');
   const screenColor=new Array(COLS*ROWS).fill(TEXT_COLOR);
 
@@ -205,75 +202,118 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   function printAt(col,row,str,color){
     for(let i=0;i<str.length;i++){const idx=row*COLS+(col+i); if(idx<screenChar.length)setCell(idx,str[i],color);}
   }
-  // ── MODIFICATION 1: border register → #c64-frame background ───────
+
+  // Frame stays solid light blue — no colour changes during load
   const frame=document.getElementById('c64-frame');
   function setBorder(ci){ frame.style.background=PALETTE[ci]; }
 
   function present(){ lctx.drawImage(buf,0,0,BUF_W,BUF_H,0,0,loader.width,loader.height); }
 
-  // State machine
-  let state='searching', stateStart=0, loadDuration=0, sweepPtr=0;
-  let lastBorderFlicker=0, cursorOn=true, lastCursorToggle=0;
+  // ── State machine ────────────────────────────────────────────────
+  // boot → typing → searching → loading → ready
+  let state='boot', stateStart=0, loadDuration=0, sweepPtr=0;
+  let cursorOn=true, lastCursorToggle=0;
+  let typingPos=0, lastTypeTime=0;
   let loaderRafId=null, loaderDone=false;
+
+  const LOAD_CMD = 'LOAD "CHUNKY_MATRIX",8,1';
+  const TYPE_DELAY = 55; // ms per keystroke
 
   function randRange(a,b){return a+Math.random()*(b-a);}
   function randInt(a,b){return Math.floor(randRange(a,b+1));}
   function randChar(set){return set[randInt(0,set.length-1)];}
 
   function startSequence(){
-    clearScreen(); setBorder(BORDER_COLOR);
-    state='searching'; stateStart=performance.now();
-    loadDuration=randRange(4000,10000);
-    sweepPtr=0;
-    printAt(2,2,'SEARCHING FOR *',TEXT_COLOR);
+    clearScreen();
+    setBorder(BORDER_COLOR); // solid light blue frame, always
+
+    // ── C64 BASIC V2 boot header ─────────────────────────────────
+    printAt(4, 1, '**** COMMODORE 64 BASIC V2 ****', TEXT_COLOR);
+    printAt(0, 3, ' 64K RAM SYSTEM  38911 BASIC BYTES FREE', TEXT_COLOR);
+    printAt(0, 5, 'READY.', TEXT_COLOR);
+    // cursor at start of command line
+    setCell(6*COLS+0, '\u2588', TEXT_COLOR);
+
+    state='typing'; stateStart=performance.now();
+    typingPos=0; lastTypeTime=0;
     present();
   }
 
-  // ── MODIFICATION 2: after READY → type RUN → trigger Matrix ───────
   function loaderFinished(){
     if(loaderDone) return; loaderDone=true;
-    // Type RUN then hand off
     setTimeout(()=>{
       clearScreen(); setBorder(BORDER_COLOR);
-      printAt(1,1,'READY.',TEXT_COLOR);
-      setCell(2*COLS+1,'█',TEXT_COLOR); present();
+      printAt(0,1,'READY.',TEXT_COLOR);
+      setCell(2*COLS+0,'\u2588',TEXT_COLOR); present();
       setTimeout(()=>{
-        printAt(1,3,'RUN',TEXT_COLOR); present();
-        setTimeout(()=>{ startMatrix(); }, 700);
-      }, 1400);
-    }, 400);
+        // type RUN
+        printAt(0,2,'R',TEXT_COLOR); present();
+        setTimeout(()=>{ printAt(1,2,'U',TEXT_COLOR); present(); }, 90);
+        setTimeout(()=>{ printAt(2,2,'N',TEXT_COLOR); present(); }, 180);
+        setTimeout(()=>{ startMatrix(); }, 900);
+      }, 1200);
+    }, 500);
   }
 
   function tick(now){
     loaderRafId=requestAnimationFrame(tick);
     const elapsed=now-stateStart;
 
-    if(state==='searching'){
-      if(elapsed>900){
-        printAt(2,4,'FOUND CHUNKY_MATRIX',TEXT_COLOR);
+    if(state==='typing'){
+      // Blink cursor while waiting
+      if(now-lastCursorToggle>350){
+        cursorOn=!cursorOn; lastCursorToggle=now;
+        setCell(6*COLS+typingPos, cursorOn?'\u2588':' ', TEXT_COLOR);
+      }
+      // Type next char
+      if(now-lastTypeTime>TYPE_DELAY && typingPos<LOAD_CMD.length){
+        // Erase cursor, write char, advance
+        setCell(6*COLS+typingPos, LOAD_CMD[typingPos], TEXT_COLOR);
+        typingPos++;
+        // Place cursor at new position
+        setCell(6*COLS+typingPos, '\u2588', TEXT_COLOR);
+        lastTypeTime=now;
+      }
+      if(typingPos>=LOAD_CMD.length && elapsed>LOAD_CMD.length*TYPE_DELAY+400){
+        // "Enter" pressed
+        setCell(6*COLS+typingPos,' ',TEXT_COLOR);
+        state='searching'; stateStart=now;
+      }
+
+    } else if(state==='searching'){
+      if(elapsed>200){
+        printAt(0,8,'SEARCHING FOR CHUNKY_MATRIX',TEXT_COLOR);
         state='found'; stateStart=now;
       }
+
     } else if(state==='found'){
-      if(elapsed>700){
-        printAt(2,6,'LOADING',TEXT_COLOR);
+      if(elapsed>900){
+        printAt(0,10,'LOADING',TEXT_COLOR);
         state='loading'; stateStart=now;
+        sweepPtr=0;
+        loadDuration=randRange(3500,8000);
       }
+
     } else if(state==='loading'){
-      const writes=randInt(18,45);
+      // PETSCII chaos fills the 320×200 screen — frame stays solid light blue
+      const writes=randInt(20,50);
       for(let w=0;w<writes;w++){
-        let idx=Math.random()<0.75?(sweepPtr=(sweepPtr+1)%screenChar.length,sweepPtr-1):randInt(0,screenChar.length-1);
-        setCell(idx,randChar(NOISE_CHARS),randInt(0,15));
+        let idx=Math.random()<0.78
+          ? (sweepPtr=(sweepPtr+1)%screenChar.length, sweepPtr-1)
+          : randInt(0,screenChar.length-1);
+        setCell(idx, randChar(NOISE_CHARS), randInt(0,15));
       }
-      if(now-lastBorderFlicker>60){ setBorder(randInt(0,15)); lastBorderFlicker=now; }
+      // NO setBorder call — frame never flickers
       if(elapsed>loadDuration){
         state='ready'; stateStart=now;
         clearScreen(); setBorder(BORDER_COLOR);
         loaderFinished();
       }
+
     } else if(state==='ready'){
       if(now-lastCursorToggle>400){
         cursorOn=!cursorOn; lastCursorToggle=now;
-        setCell(2*COLS+1,cursorOn?'█':' ',TEXT_COLOR);
+        setCell(3*COLS+0, cursorOn?'\u2588':' ', TEXT_COLOR);
       }
     }
     present();
