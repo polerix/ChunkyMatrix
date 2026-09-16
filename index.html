@@ -210,7 +210,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let loaderRafId=null, loaderDone=false;
 
   const LOAD_CMD = 'LOAD "CHUNKY_MATRIX",8,1';
-  const TYPE_DELAY = 55; // ms per keystroke
+  const TYPE_DELAY = 130; // ms per keystroke — human pacing
 
   function randRange(a,b){return a+Math.random()*(b-a);}
   function randInt(a,b){return Math.floor(randRange(a,b+1));}
@@ -267,7 +267,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
         setCell(6*COLS+typingPos, '\u2588', TEXT_COLOR);
         lastTypeTime=now;
       }
-      if(typingPos>=LOAD_CMD.length && elapsed>LOAD_CMD.length*TYPE_DELAY+400){
+      if(typingPos>=LOAD_CMD.length && elapsed>LOAD_CMD.length*TYPE_DELAY+900){
         // "Enter" pressed
         setCell(6*COLS+typingPos,' ',TEXT_COLOR);
         state='searching'; stateStart=now;
@@ -280,7 +280,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       }
 
     } else if(state==='found'){
-      if(elapsed>900){
+      if(elapsed>1400){
         printAt(0,10,'LOADING',TEXT_COLOR);
         state='loading'; stateStart=now;
         sweepPtr=0;
@@ -325,7 +325,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   const ctx  = cvs.getContext('2d');
 
   // Screen background (C64 colour 6 dark blue)
-  const C_BG   = '#3535CA';
+  const C_BG   = '#40318D'; // Pepto C64 colour 6 (blue)
   // Matrix trail colours
   const C_HEAD = '#FFFFFF';   // white head
   const C_TR1  = '#94E089';   // C64 colour 13 light green
@@ -436,10 +436,8 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     if(ch===' '){ grid[c][r]=' '; return; }
     const si=INV_SENTINELS.indexOf(ch);
     if(si>=0){ drawSprite(c,r,color,si); return; }
-    if(glow){ ctx.shadowColor='#55ff55'; ctx.shadowBlur=CELL_W*0.55; }
     ctx.fillStyle=color;
     ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
-    ctx.shadowBlur=0;
     grid[c][r]=ch;
   }
 
