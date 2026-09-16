@@ -153,7 +153,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     debugEl.id = 'debug-overlay';
     debugEl.style.cssText =
       'position:fixed;top:0;left:0;right:0;z-index:99999;'+
-      'background:rgba(0,0,0,0.88);color:#7CFC7C;'+
+      'background:rgba(0,0,0,0.5);color:#7CFC7C;text-shadow:0 1px 2px #000;'+
       'font:10px/1.5 -apple-system,monospace;padding:6px 8px;'+
       'white-space:pre-wrap;pointer-events:none;'+
       'max-height:60vh;overflow:auto;';
@@ -318,8 +318,13 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     cvs.width =Math.round(CSS_W*dpr);
     cvs.height=Math.round(CSS_H*dpr);
     ctx.setTransform(dpr,0,0,dpr,0,0);
-    COLS=Math.ceil(CSS_W/CELL_W);
-    ROWS=Math.ceil(CSS_H/CELL_H);
+    // Floor, not ceil: COLS*CELL_W must never exceed CSS_W (same for rows)
+    // — a ceil here can round the total content size up past the drawable
+    // area by up to one cell, which is real, visible overflow, not just a
+    // rounding nicety. A floor leaves at most one cell's width of solid
+    // background at the far edge instead, which reads as margin, not a bug.
+    COLS=Math.max(1,Math.floor(CSS_W/CELL_W));
+    ROWS=Math.max(1,Math.floor(CSS_H/CELL_H));
     applyFont();
     ctx.fillStyle=bg();
     ctx.fillRect(0,0,CSS_W,CSS_H);
@@ -653,9 +658,33 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   cbSnd.addEventListener('change',()=>{ cbSnd.checked?snd.play().catch(()=>{}):snd.pause(); });
   document.addEventListener('pointerdown',()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); },{once:true});
 
-  window.addEventListener('resize',()=>{
-    resize(); // resize() calls initColumns() — no extra work needed
-  },{passive:true});
+  // Real-device readout (iPhone 17 Pro, DPR3) caught resize()'s CSS_W/CSS_H
+  // disagreeing with a getBoundingClientRect() of the SAME wrapper element
+  // taken moments later — window 'resize' fired, but Safari's dynamic
+  // toolbar/safe-area hadn't finished settling into its final size yet
+  // (this happens after rotation especially), so resize() measured a
+  // transient, not-yet-final layout. ResizeObserver fires strictly after
+  // layout, for the box size the element ACTUALLY ends up at, however that
+  // happened (rotation, toolbar collapse, anything) — the correct signal,
+  // not a heuristic proxy for one. Observe the wrapper, not the canvas:
+  // the canvas's own width/height ATTRIBUTE changes (set inside resize())
+  // could self-trigger spurious notifications, the wrapper's box size only
+  // changes from real layout causes.
+  const wrapperEl = document.getElementById('c64-screen-wrapper');
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(()=>{
+      resize();
+      // Backstop: Safari can report one more, smaller settle shortly after
+      // this fires (toolbar animation finishing) without a distinct
+      // ResizeObserver entry for it — catch that too.
+      requestAnimationFrame(()=>{ resize(); });
+    });
+    ro.observe(wrapperEl);
+  } else {
+    // Extremely old browser fallback — ResizeObserver has shipped in every
+    // major engine (incl. Safari) since 2020.
+    window.addEventListener('resize',()=>{ resize(); },{passive:true});
+  }
 
   // ── Start — wait for fonts ────────────────────────────────────────
   // Use document.fonts.load() with the exact weight/size rather than
