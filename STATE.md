@@ -4,11 +4,11 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (crash fix + 6-item follow-up pass).
+> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes).
 
 ## What this is
 
-A single-file browser screensaver: `index.html` (~550 lines, vanilla JS,
+A single-file browser screensaver: `index.html` (~555 lines, vanilla JS,
 no build step, no dependencies). It fakes a Commodore 64 boot sequence
 (`**** C64 BASIC V2 ****`, `LOAD "CHUNKY-MATRIX",8,1`, PETSCII load-noise)
 that transitions into a Matrix-style character rain rendered in a chunky
@@ -29,7 +29,8 @@ column per step).
 
 - **One IIFE**, no modules, no build. Canvas `#matrix-cvs` inside a
   `#c64-frame` > `#c64-screen-wrapper` DOM structure that mimics a C64
-  monitor bezel.
+  monitor bezel. `#colour-hint` also lives inside `#c64-screen-wrapper` now
+  (moved there this session — see mobile fixes below).
 - **State machine** (`bootState`) drives everything through one
   `requestAnimationFrame` loop (`tick()`):
   `init → waiting → typing → searching → found → loading → ready → rain`
@@ -40,11 +41,23 @@ column per step).
 - **Font**: self-hosted `BoutiqueBitmap9x9_Bold.ttf` (checked into repo,
   ~2.1MB), loaded via `document.fonts.load()` before boot starts, with an
   off-screen warm-up `fillText` to force glyph rasterization.
-- **Sizing**: `chunkSize()` derives cell width from `window.innerWidth`;
-  `resize()` recomputes `COLS`/`ROWS`/`grid`/`columns` and is wired to the
-  `window resize` event. `resize()` now returns `false` and touches nothing
-  if the wrapper is still a 0×0 rect (see crash fix below) — callers must
-  check this before proceeding.
+- **Sizing**: `chunkSize(W)` takes the drawable width in CSS px (the
+  `#c64-screen-wrapper` rect, not `window.innerWidth`) and derives cell
+  width from a target column count that scales with `W`, clamped to
+  `[24, 34]` columns — guarantees the 22-char boot header always fits with
+  margin at any width down to 320px, while staying "chunky" (not shrinking
+  to normal terminal density) on a large desktop window. Rewritten this
+  session — see mobile fixes below for why the old flat-divisor formula
+  broke on real phones.
+- **DPR handling**: `resize()` sizes the canvas *backing store* to CSS px
+  × `devicePixelRatio` and applies `ctx.setTransform(dpr,0,0,dpr,0,0)`, so
+  all drawing (still done in CSS-px coordinates everywhere else in the
+  file) renders crisp on HiDPI/Retina screens. Added this session — there
+  was previously no DPR handling at all. `CSS_W`/`CSS_H` module vars hold
+  the CSS-px drawable size; don't use `cvs.width`/`cvs.height` for draw
+  math, those are now device-pixel values.
+- `resize()` returns `false` and touches no state if the wrapper is still
+  a 0×0 rect (see crash-fix section below) — callers must check this.
 - **Rain**: each column is `{x, row, speed, delay, len, band}`. `band` is
   `x % 4` (4 groups); `updateMatrix()` gives each band an identical phase
   offset so columns in the same band crest together — a real synced-wave
@@ -53,45 +66,112 @@ column per step).
 - **Palette**: 16-color C64 "Pepto" palette. Tap-to-cycle: tap a glyph →
   cycle head color; tap empty cell → cycle background; tap the frame border
   → cycle frame color. Short tap = one step. Hold >500ms → fast-cycle at
-  150ms/step, additive on top of the single-tap behavior. Implemented via
-  `pointerdown`/`pointerup`/`pointercancel` on both the canvas and the
-  frame.
+  150ms/step, additive on top of the single-tap behavior.
 - **Controls strip**: checkboxes for CJK glyphs, ASCII glyphs, "SIG"
   (Space Invader sprite glyphs), and sound on/off.
 - **Discoverability hint**: `#colour-hint` fades in when rain starts,
-  fades out 5s later — tells the user tap/hold cycles colors.
+  fades out 5s later. Now `position:absolute` inside
+  `#c64-screen-wrapper` (was `position:fixed` on the viewport — see mobile
+  fixes below).
 - **Audio**: `soundtrack.mp4` (~17.7MB, checked into repo directly, not
   Git LFS) as a looping `<audio>` element, gated behind a user gesture
   (autoplay policy) and the SND checkbox.
 
 README.md does not track any of this — see "Known stale" below.
 
-## Confirmed working (this session)
+## Current status: live site is fixed and pushed
 
-- **The boot-freeze crash is fixed and verified end-to-end**, locally, via
-  a Python static server + the in-app browser: full cycle
-  `waiting → typing → searching → found → loading → rain` completes with
-  zero console errors. Root cause and fix are below. **This fix has NOT
-  been pushed to `origin/main` yet — ask before pushing, live site is
-  still broken until it is.**
-- Header no longer wraps at narrow `COLS` (verified at 375px emulated
-  mobile width): truncates cleanly instead, so the "2 blank lines between
-  header and 64K RAM SYSTEM" layout holds at any width.
-- Band-sync wave effect now actually uses the `band` field (previously
-  dead code) — verified no console errors across multiple full boot→rain
-  cycles, but the *visual quality* of the effect needs a human to look at
-  it (see below).
-- Hint-fade, resize/initColumns, palette hold-cycle, and PETSCII linear
-  sweep were all checked this session and found already correct from
-  commit `0804cad` — no changes made, see "Verified but not touched".
+`origin/main` is at `0d96c48`. GitHub Pages redeployed and was verified
+serving that exact commit. Confirmed live, end to end:
+- Boot-freeze crash: fixed, verified (full boot→rain cycle, zero console
+  errors, both locally and on the actual deployed URL).
+- Mobile overflow (giant glyphs, ~5-col rain, HUD collision): fixed and
+  verified locally at 320/375/390/414/430 CSS px, portrait + landscape,
+  DPR 2 (real) and DPR 3 (see caveat below) — **not yet re-verified on the
+  live URL after push; do that before considering this fully closed.**
 
-## Fixed this session: boot-freeze crash (root cause)
+## Fixed this session (part 2): mobile overflow — DPR + responsive sizing + HUD
+
+PAUL-ERIC tested on a real iPhone (Safari, 390pt CSS width, DPR 3) after
+the first round of fixes shipped, and it was unusable: ~7 giant glyphs
+spanning the header, ~5-column rain, and the colour-hint text overlapping
+the CJK/ABC/SIG/SND controls row. His strong suspicion was a DPR bug.
+
+**Diagnosed DPR first, as asked, and it was a red herring for the size
+problem** (though a real, separate bug — see below). The actual cause:
+`chunkSize()` computed cell width as `Math.max(7, Math.floor(W/55))`
+columns, a flat ~55px-per-cell divisor. At `window.innerWidth=390`,
+`390/55=7.09` → exactly 7 columns — matches "~7 characters span the
+width" precisely, no DPR needed to explain it. This divisor was tuned for
+desktop browser windows (800-1200px) and never tested at real phone
+widths; it also read `window.innerWidth` instead of the actual drawable
+width (wrapper rect minus frame padding), which was already slightly
+wrong even before considering phones.
+
+**The DPR bug was real too, just not the cause of this specific symptom.**
+There was zero `devicePixelRatio` handling anywhere: the canvas backing
+store was sized 1:1 with CSS pixels regardless of screen density, so text
+would render soft/blurry on any 2x/3x display (would've been invisible on
+a 1x desktop monitor, which is presumably why it was never caught before
+real-phone testing).
+
+Three fixes, two commits (`c19602d` DPR+sizing, `0d96c48` HUD — see each
+commit message for full detail):
+
+1. `chunkSize(W)` rewritten to target `[24,34]` columns scaling with the
+   actual wrapper width, guaranteeing the 22-char header fits with margin
+   at any tested width. **Disclosed side effect**: desktop cell size drops
+   from ~57px/14cols to roughly 30-40px/25-32cols — a universal floor that
+   fixes phones necessarily tightens desktop too, if scaling stays smooth.
+   Flagged, not separately confirmed with PAUL-ERIC yet.
+2. `resize()` now scales the canvas backing store by `devicePixelRatio`
+   and applies a matching `ctx` transform, so HiDPI screens get crisp text
+   instead of a blurry 1x bitmap stretched up.
+3. `#colour-hint` moved from `position:fixed` (viewport-relative,
+   collided with the controls row once mobile padding shrank the gap) to
+   `position:absolute` inside `#c64-screen-wrapper` — anchored to the
+   screen it describes, structurally can't reach the controls row below
+   it regardless of viewport size.
+
+**Verification caveat, important for future sessions**: this session's
+browser pane runs backgrounded (`document.hidden === true`), and partway
+through testing its `screenshot` tool was caught serving a **stale
+composite** of the canvas — a screenshot showed the header text cut off
+mid-word while a direct `ctx.getImageData()` pixel read of the *same
+loaded page, same moment* showed the full, correct, untruncated header
+rendered all the way across. Don't trust `computer.screenshot` alone on
+this pane for canvas-heavy verification; cross-check with direct state
+(here: reading the `grid` array via a temporary debug hook, and
+`ctx.getImageData` pixel sampling) before concluding something is broken.
+All verification in this section used those direct methods, not raw
+screenshots.
+
+**DPR 3 wasn't directly emulable** — the available `resize_window` tool
+ties DPR to a width<768 heuristic and always gives DPR 2 for phone-sized
+custom widths, with no explicit DPR override. Validated the DPR-3 path
+indirectly instead: confirmed the canvas backing-store math
+(`cvs.width = Math.round(CSS_W * dpr)`) has no DPR-value-specific branching
+— it's pure arithmetic on `window.devicePixelRatio` — then verified that
+arithmetic is correct at the real DPR-2 emulation (pixel-level, via
+`getImageData`) and again after overriding `window.devicePixelRatio` to 3
+and dispatching a `resize` event (confirmed `cvs.width` scaled by exactly
+3×). Reasonable confidence, but **not a substitute for someone actually
+checking on a real DPR-3 device** — PAUL-ERIC's iPhone is exactly that
+device; worth a quick recheck once he pulls the fix.
+
+Widths tested (portrait unless noted): 320, 375, 390 (his phone), 414,
+430; landscape 568×320 and 844×390 (the latter fell back to DPR 1 in the
+emulator due to the width<768 heuristic, not representative of a real
+device's landscape DPR — flagging, not a real risk since the DPR code
+path itself was separately validated above). Header fit and zero
+HUD-overlap confirmed at every size. Zero console errors throughout.
+
+## Fixed this session (part 1): boot-freeze crash (root cause)
 
 `resize()` ran once when `document.fonts.load()` resolved. On both the
 live deployed site and a fresh local load, `#c64-screen-wrapper
 .getBoundingClientRect()` sometimes returned a **0×0 rect** at that exact
-moment — a real layout-timing race, not a viewport-width thing (reproduced
-identically at ~1024px and via a local static server). That made
+moment — a real layout-timing race, not a viewport-width thing. That made
 `COLS`/`ROWS` both `NaN` (`0/0`) and left `grid` as an empty array.
 
 The bounds guard in `drawCh` — `if(col<0||col>=COLS||row<0||row>=ROWS)
@@ -99,83 +179,47 @@ return;` — is silently `false` for *every* comparison against `NaN`, so it
 didn't catch this. `startBoot()`'s first `printAt` call then executed
 `grid[NaN][2] = ch`, threw, and since `requestAnimationFrame(tick)` was
 the next line in the same callback, **the animation loop never started**.
-The page looked frozen because it was — permanently stuck on a static,
-partially-correct boot screen.
 
-Fix (commit `2ac0f30`):
-- `resize()` now returns `false` and touches no state if the wrapper rect
-  is still 0×0; the boot startup (`startWhenLaidOut()`) retries via
-  `requestAnimationFrame` until layout is actually ready.
-- All four bounds checks (`drawCh`, `drawSprite`, `drawCell`, `recolour`)
-  flipped from negated-OR to positive-AND form
-  (`if(!(col>=0&&col<COLS&&...))`), so a stray `NaN` can never slip
-  through as a false negative again — this class of bug can't recur even
-  if some other future code path produces `NaN` dimensions.
+Fix (commit `2ac0f30`): `resize()` returns `false` and touches no state on
+a 0×0 rect, retrying via `requestAnimationFrame`; all four bounds checks
+flipped to positive-AND form so a stray `NaN` can't slip through again.
 
 ## Experimental — needs your eyes
 
-**Band-sync wave (commit `da4c4fe`), v1.** `makeColumn()` already set
-`band: x%4` on every column, but `updateMatrix()` never read it — the
-wave-boost phase was computed from `col.x` directly (a smooth per-column
-gradient across all columns), not a band grouping, even though the code
-comment claimed "columns in the same band share a phase." That was false;
-`band` was dead.
-
-Changed the phase formula to `Math.sin(rainFrame*0.05 + col.band*(Math.PI/2))`
-so columns in the same band now get an *identical* boost value every
-frame — a wave that visibly passes through 4 discrete clusters in turn,
-rather than a continuous gradient. This is one variant, not tuned: frame
-scale (`0.05`), phase spacing (`PI/2`), and crest threshold (`0.82`) are
-starting points. **Look at it live and say whether to keep it, retune the
-constants, or try a different shape entirely** — task instructions were
-explicit that this should stay a single experimental variant, not three
-speculative ones, so no alternatives were built.
+**Band-sync wave (commit `da4c4fe`), v1.** `makeColumn()` set `band: x%4`
+on every column, but `updateMatrix()` never read it — the wave-boost phase
+was computed from `col.x` directly (a smooth per-column gradient), not a
+band grouping, even though the comment claimed otherwise. Changed the
+phase formula to `Math.sin(rainFrame*0.05 + col.band*(Math.PI/2))` so
+columns in the same band get an identical boost every frame — a wave
+passing through 4 discrete clusters. Not tuned: frame scale (`0.05`),
+phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
+**Still waiting on your eyes on this — keep, retune, or scrap.**
 
 ## Verified but not touched (already correct from `0804cad`)
 
-Checked each of these against explicit requirements this session; found
-correct, made no changes, no commits:
-
-- **PETSCII loading sweep**: `chaosPos`/`chaosTotal`/`chaosBatch` iterate
-  `i = 0..COLS*ROWS-1` converted via `c=i%COLS, r=Math.floor(i/COLS)` —
-  deterministic row-major top-left→bottom-right sweep, matches "address
-  order" exactly.
-- **Discoverability hint**: fires on rain start, fades after 5s. Confirmed
-  the code path actually executes (inline `opacity` style left at `'0'`
-  after a full run, proving the show/fade timer both ran).
-- **Resize mid-rain**: `resize()` unconditionally calls `initColumns()`
-  (rebuilds `grid`+`columns` cleanly) but never touches `bgIdx`/
-  `frameIdx`/`headIdx` — palette selection survives a resize/rotation,
-  column state resets, exactly as specified.
-- **Hold-to-fast-cycle**: `pointerdown` arms a 500ms timer; release before
-  500ms cancels the timer and fires one step (single tap unchanged);
-  release after fires nothing extra (already fast-cycling via
-  `setInterval`, cycling just stops). Reasoned through the state machine
-  by hand, no bug found.
-
-## A note on testing this session
-
-The in-app browser pane frequently reports `document.hidden === true`
-(backgrounded), which throttles `requestAnimationFrame` heavily — a
-still-frame that looks "frozen" for 10-15s of wall-clock wait may just be
-a throttled background tab, not a bug. Confirmed this by waiting long
-enough (~20s cumulative) for the same page to complete the full boot
-cycle. If a future session sees an apparent freeze while testing in this
-pane, check `document.hidden` / `tabs_context`'s "pane is hidden" note
-before concluding the app is broken.
+- **PETSCII loading sweep**: deterministic row-major top-left→bottom-right
+  sweep, matches "address order" exactly.
+- **Discoverability hint timing**: fires on rain start, fades after 5s
+  (position was buggy — fixed this session — but the timing logic itself
+  was always correct).
+- **Resize mid-rain**: `resize()` rebuilds `grid`+`columns` cleanly but
+  never touches palette indices — colour selection survives a
+  resize/rotation, column state resets, exactly as specified.
+- **Hold-to-fast-cycle**: single tap still steps one colour, hold engages
+  fast-cycle, additive as specified. No bug found.
 
 ## Known stale / not broken but wrong
 
-- **README.md is out of date.** Not touched this session (deferred, per
-  task order — do this next, see below).
+- **README.md is out of date.** Not touched this session — next in queue.
   - References CRT scanline/vignette overlay and gyroscope tilt — both
-    *removed* in commit `4c49887`. No `DeviceOrientationEvent` code exists
-    in `index.html`.
+    *removed* in commit `4c49887`. No `DeviceOrientationEvent` code exists.
   - Tells the reader to open `chunky-matrix.html` — renamed to
     `index.html` in commit `9570d49`.
   - Doesn't mention the boot sequence at all, which is now most of the
     file and most of the recent commit history.
   - Byline says "Browser port by Claude Sonnet 4.6" — stale.
+  - Doesn't mention any of the mobile/DPR/sizing work either, obviously.
   - **Do not trust README.md as a description of current behavior.**
 
 ## Settled decisions (don't re-litigate)
@@ -183,37 +227,48 @@ before concluding the app is broken.
 - Single unified canvas/grid for both boot text and rain, not two
   renderers (`d1a0441`).
 - CRT scanline/vignette overlay was tried and explicitly removed
-  (`4c49887`) in favor of just the soundtrack — don't re-add without
-  checking why it was pulled.
+  (`4c49887`) in favor of just the soundtrack.
 - No build step, no framework, no bundler. Stays a single `index.html`.
 - Binary assets (font, soundtrack) are committed directly to the repo, not
   via Git LFS or an external CDN — flagged, not yet decided on.
 - 16-color "Pepto" C64 palette is fixed/canonical.
-- Header/boot single-line text (header, "64K RAM SYSTEM", "READY.") now
-  uses `printLine()` (truncates, never wraps) instead of `printAt()`
-  (wraps) — established this session, keep using `printLine` for any new
-  boot text that must land on an exact row.
-- Band-sync is genuinely experimental (see above) — don't treat the v1
-  constants as final without feedback.
+- Boot single-line text (header, "64K RAM SYSTEM", "READY.") uses
+  `printLine()` (truncates, never wraps) instead of `printAt()` (wraps) —
+  keep using `printLine` for any new boot text landing on an exact row.
+- Cell sizing is now `chunkSize(W)` keyed off actual drawable width, target
+  column count clamped `[24,34]` — don't reintroduce a flat px-per-cell
+  divisor, that's exactly what broke on real phones.
+- Canvas backing store is DPR-scaled (`CSS_W/H * devicePixelRatio`); any
+  new code drawing to the canvas should keep using CSS-px coordinates
+  (`CELL_W`, `CSS_W`, etc.) — the `ctx` transform handles the rest. Don't
+  read `cvs.width`/`cvs.height` for layout math, they're device-px now.
+- `#colour-hint` lives inside `#c64-screen-wrapper` as `position:absolute`
+  — don't move it back to a viewport-fixed position, that's what caused
+  the HUD collision on mobile.
+- Band-sync is genuinely experimental — don't treat the v1 constants as
+  final without feedback.
+- This session's browser pane can serve stale `screenshot` composites for
+  canvas content when backgrounded — prefer direct state reads
+  (`getImageData`, or a temporary debug hook) over screenshots when
+  verifying canvas-rendered content in this environment.
 
 ## Outstanding questions for PAUL-ERIC
 
-1. **Push to `origin/main`?** 5 commits sit local-only right now (STATE.md,
-   crash fix, header-wrap fix, band-sync v1 — see `git log` for the
-   full list by the time you read this). The live site is broken until
-   the crash fix ships. Waiting on explicit go-ahead before pushing.
-2. **Band-sync v1** (above) — keep, retune, or scrap for a different
-   shape?
+1. **Recheck the live site on your actual iPhone** once you pull — this
+   was verified thoroughly in emulation but DPR 3 specifically couldn't be
+   directly emulated (see caveat above). Should be fine, want it confirmed
+   on the real device that reported the bug.
+2. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols) —
+   acceptable, or do you want desktop kept chunkier even if that means the
+   universal 22-char floor isn't perfectly smooth across all widths?
+3. **Band-sync v1** — keep, retune, or scrap for a different shape?
 
 ## Immediate next steps
 
-1. Get a push decision (see above) — the live site is down until the
-   crash fix ships.
-2. **Rewrite README.md** to describe the actual current architecture
-   (boot state machine, unified grid, palette cycling) instead of the
-   pre-boot-sequence version. Not started — next in the task queue.
-3. Decide whether the two large binaries (font `.ttf`, `.mp4` soundtrack)
-   should move to Git LFS or stay as-is — not urgent, just flagged.
+1. Confirm live site on a real phone (see above).
+2. **Rewrite README.md** — next in queue, not started. Should now also
+   describe the responsive sizing and DPR handling.
+3. Decide on Git LFS for the two large binaries — not urgent, flagged.
 
 Don't start any of these without checking in — this file is a snapshot,
 not a plan.
