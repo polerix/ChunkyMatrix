@@ -230,7 +230,8 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     frame.style.background=fCol();
     clearGrid();
     const LB=PALETTE[14]; // light blue for text
-    printAt(0,0,'**** C64 BASIC V2 ****',LB);
+    const headerStr='**** C64 BASIC V2 ****';
+    printAt(Math.floor((COLS-headerStr.length)/2),0,headerStr,LB);
     printAt(0,2,'64K RAM SYSTEM',LB);
     printAt(0,4,'READY.',LB);
     drawCh(0,CMD_ROW,'█',LB);        // cursor before LOAD cmd
