@@ -4,11 +4,11 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (session reconstructing lost state).
+> Last updated: 2026-09-16, by Claude (crash fix + 6-item follow-up pass).
 
 ## What this is
 
-A single-file browser screensaver: `index.html` (~540 lines, vanilla JS,
+A single-file browser screensaver: `index.html` (~550 lines, vanilla JS,
 no build step, no dependencies). It fakes a Commodore 64 boot sequence
 (`**** C64 BASIC V2 ****`, `LOAD "CHUNKY-MATRIX",8,1`, PETSCII load-noise)
 that transitions into a Matrix-style character rain rendered in a chunky
@@ -34,134 +34,186 @@ column per step).
   `requestAnimationFrame` loop (`tick()`):
   `init → waiting → typing → searching → found → loading → ready → rain`
   Boot text and the rain reuse the *same* grid/cell/font machinery
-  (`drawCh`, `printAt`, `grid[][]`) — this was a deliberate "unified single
-  canvas" decision (commit `d1a0441`), not two separate renderers.
+  (`drawCh`, `printAt`/`printLine`, `grid[][]`) — this was a deliberate
+  "unified single canvas" decision (commit `d1a0441`), not two separate
+  renderers.
 - **Font**: self-hosted `BoutiqueBitmap9x9_Bold.ttf` (checked into repo,
   ~2.1MB), loaded via `document.fonts.load()` before boot starts, with an
-  off-screen warm-up `fillText` to force glyph rasterization (avoids a
-  system-font flash on the first character).
+  off-screen warm-up `fillText` to force glyph rasterization.
 - **Sizing**: `chunkSize()` derives cell width from `window.innerWidth`;
   `resize()` recomputes `COLS`/`ROWS`/`grid`/`columns` and is wired to the
-  `window resize` event.
-- **Rain**: each column is `{x, row, speed, delay, len, band}`. Columns are
-  grouped into 4 "bands" (`x % 4`) that get a synchronized extra tick on a
-  sine-wave crest (`waveBoost`), so groups of columns visually surge
-  together — this is a browser-only embellishment, not in the original ASM.
+  `window resize` event. `resize()` now returns `false` and touches nothing
+  if the wrapper is still a 0×0 rect (see crash fix below) — callers must
+  check this before proceeding.
+- **Rain**: each column is `{x, row, speed, delay, len, band}`. `band` is
+  `x % 4` (4 groups); `updateMatrix()` gives each band an identical phase
+  offset so columns in the same band crest together — a real synced-wave
+  effect, not a per-column gradient (see "Experimental — needs your eyes"
+  below, this is v1 and may need tuning).
 - **Palette**: 16-color C64 "Pepto" palette. Tap-to-cycle: tap a glyph →
   cycle head color; tap empty cell → cycle background; tap the frame border
-  → cycle frame color. Hold >500ms → fast-cycle at 150ms/step. Implemented
-  via `pointerdown`/`pointerup`/`pointercancel` on both the canvas and the
+  → cycle frame color. Short tap = one step. Hold >500ms → fast-cycle at
+  150ms/step, additive on top of the single-tap behavior. Implemented via
+  `pointerdown`/`pointerup`/`pointercancel` on both the canvas and the
   frame.
 - **Controls strip**: checkboxes for CJK glyphs, ASCII glyphs, "SIG"
   (Space Invader sprite glyphs), and sound on/off.
+- **Discoverability hint**: `#colour-hint` fades in when rain starts,
+  fades out 5s later — tells the user tap/hold cycles colors.
 - **Audio**: `soundtrack.mp4` (~17.7MB, checked into repo directly, not
   Git LFS) as a looping `<audio>` element, gated behind a user gesture
   (autoplay policy) and the SND checkbox.
 
-No README update has tracked any of this — see "Known broken / stale" below.
+README.md does not track any of this — see "Known stale" below.
 
-## Confirmed working
+## Confirmed working (this session)
 
-- File matches deployed site **byte-for-byte** (verified via UTF-8 byte
-  count fetch, 2026-09-16): GitHub Pages is serving exactly `main` HEAD
-  (`0804cad`). No deploy lag, no stale cache issue.
-- Font loads and renders correctly (`BoutiqueBitmap9x9`), no fallback-font
-  flash observed.
-- Boot text draws (header, `64K RAM SYSTEM`, `READY.`) — see caveat below,
-  layout is currently broken at some viewport widths.
-- No open GitHub issues or PRs. Working tree is clean, `main` is in sync
-  with `origin/main`.
+- **The boot-freeze crash is fixed and verified end-to-end**, locally, via
+  a Python static server + the in-app browser: full cycle
+  `waiting → typing → searching → found → loading → rain` completes with
+  zero console errors. Root cause and fix are below. **This fix has NOT
+  been pushed to `origin/main` yet — ask before pushing, live site is
+  still broken until it is.**
+- Header no longer wraps at narrow `COLS` (verified at 375px emulated
+  mobile width): truncates cleanly instead, so the "2 blank lines between
+  header and 64K RAM SYSTEM" layout holds at any width.
+- Band-sync wave effect now actually uses the `band` field (previously
+  dead code) — verified no console errors across multiple full boot→rain
+  cycles, but the *visual quality* of the effect needs a human to look at
+  it (see below).
+- Hint-fade, resize/initColumns, palette hold-cycle, and PETSCII linear
+  sweep were all checked this session and found already correct from
+  commit `0804cad` — no changes made, see "Verified but not touched".
 
-## Known broken — HIGH PRIORITY
+## Fixed this session: boot-freeze crash (root cause)
 
-**The deployed site currently throws an uncaught exception during boot and
-freezes.** Verified live on https://polerix.github.io/ChunkyMatrix/ on
-2026-09-16 at a browser viewport of ~1024×768:
+`resize()` ran once when `document.fonts.load()` resolved. On both the
+live deployed site and a fresh local load, `#c64-screen-wrapper
+.getBoundingClientRect()` sometimes returned a **0×0 rect** at that exact
+moment — a real layout-timing race, not a viewport-width thing (reproduced
+identically at ~1024px and via a local static server). That made
+`COLS`/`ROWS` both `NaN` (`0/0`) and left `grid` as an empty array.
 
-```
-Uncaught (in promise) TypeError: Cannot set properties of undefined (setting '2')
-  at index.html:531  (inside startBoot(), called from the fonts.load().then() callback)
-```
+The bounds guard in `drawCh` — `if(col<0||col>=COLS||row<0||row>=ROWS)
+return;` — is silently `false` for *every* comparison against `NaN`, so it
+didn't catch this. `startBoot()`'s first `printAt` call then executed
+`grid[NaN][2] = ch`, threw, and since `requestAnimationFrame(tick)` was
+the next line in the same callback, **the animation loop never started**.
+The page looked frozen because it was — permanently stuck on a static,
+partially-correct boot screen.
 
-Because this throws synchronously inside the `document.fonts.load().then()`
-callback, and `requestAnimationFrame(tick)` is the *last* line of that
-callback (line 532), **the main tick loop never starts**. The result: the
-page renders a static, half-correct boot screen and then does nothing
-forever — no cursor blink, no LOAD typing, no PETSCII chaos, no transition
-to rain. It looks "frozen," not just slow.
+Fix (commit `2ac0f30`):
+- `resize()` now returns `false` and touches no state if the wrapper rect
+  is still 0×0; the boot startup (`startWhenLaidOut()`) retries via
+  `requestAnimationFrame` until layout is actually ready.
+- All four bounds checks (`drawCh`, `drawSprite`, `drawCell`, `recolour`)
+  flipped from negated-OR to positive-AND form
+  (`if(!(col>=0&&col<COLS&&...))`), so a stray `NaN` can never slip
+  through as a false negative again — this class of bug can't recur even
+  if some other future code path produces `NaN` dimensions.
 
-Symptom also observed: the `**** C64 BASIC V2 ****` header (22 chars) wraps
-onto the next row at some viewport widths because `startBoot()`'s header
-`printAt` call doesn't account for line-wrap the way the `LOAD` command row
-does (`SEARCH_ROW` is explicitly recomputed for wrap, the header isn't).
-This shifts every row below it down by one and likely contributes to (or is
-a symptom of the same root cause as) the `grid[col][row]` crash — a
-mismatch between the `COLS`/`ROWS` used for the bounds check in `drawCh`
-and the actual dimensions of the `grid` array at the moment `startBoot()`
-runs.
+## Experimental — needs your eyes
 
-**Not yet root-caused precisely.** Prime suspect is the interaction between
-`resize()` (which rebuilds `grid` via `initColumns()`) and something in the
-"initColumns resize" work from the last commit (`0804cad` — "Boot:
-2-blank-line layout + 1Hz cursor wait; PETSCII linear sweep; wave-band
-rain; mobile hint; initColumns resize; hold-to-fast-cycle palette"). That
-commit touched boot layout, resize/initColumns, and the palette-cycle
-timing all at once — worth `git show 0804cad` first before touching
-anything, to see if it can be isolated to one of those changes.
+**Band-sync wave (commit `da4c4fe`), v1.** `makeColumn()` already set
+`band: x%4` on every column, but `updateMatrix()` never read it — the
+wave-boost phase was computed from `col.x` directly (a smooth per-column
+gradient across all columns), not a band grouping, even though the code
+comment claimed "columns in the same band share a phase." That was false;
+`band` was dead.
 
-**This means: the currently-live, currently-deployed version of the site is
-broken for at least some viewport sizes**, and may be broken universally
-(untested at narrower widths where the header doesn't wrap — worth checking
-whether the crash still happens there, since the observed stack trace is
-identical across the two reproductions here regardless of wrap).
+Changed the phase formula to `Math.sin(rainFrame*0.05 + col.band*(Math.PI/2))`
+so columns in the same band now get an *identical* boost value every
+frame — a wave that visibly passes through 4 discrete clusters in turn,
+rather than a continuous gradient. This is one variant, not tuned: frame
+scale (`0.05`), phase spacing (`PI/2`), and crest threshold (`0.82`) are
+starting points. **Look at it live and say whether to keep it, retune the
+constants, or try a different shape entirely** — task instructions were
+explicit that this should stay a single experimental variant, not three
+speculative ones, so no alternatives were built.
+
+## Verified but not touched (already correct from `0804cad`)
+
+Checked each of these against explicit requirements this session; found
+correct, made no changes, no commits:
+
+- **PETSCII loading sweep**: `chaosPos`/`chaosTotal`/`chaosBatch` iterate
+  `i = 0..COLS*ROWS-1` converted via `c=i%COLS, r=Math.floor(i/COLS)` —
+  deterministic row-major top-left→bottom-right sweep, matches "address
+  order" exactly.
+- **Discoverability hint**: fires on rain start, fades after 5s. Confirmed
+  the code path actually executes (inline `opacity` style left at `'0'`
+  after a full run, proving the show/fade timer both ran).
+- **Resize mid-rain**: `resize()` unconditionally calls `initColumns()`
+  (rebuilds `grid`+`columns` cleanly) but never touches `bgIdx`/
+  `frameIdx`/`headIdx` — palette selection survives a resize/rotation,
+  column state resets, exactly as specified.
+- **Hold-to-fast-cycle**: `pointerdown` arms a 500ms timer; release before
+  500ms cancels the timer and fires one step (single tap unchanged);
+  release after fires nothing extra (already fast-cycling via
+  `setInterval`, cycling just stops). Reasoned through the state machine
+  by hand, no bug found.
+
+## A note on testing this session
+
+The in-app browser pane frequently reports `document.hidden === true`
+(backgrounded), which throttles `requestAnimationFrame` heavily — a
+still-frame that looks "frozen" for 10-15s of wall-clock wait may just be
+a throttled background tab, not a bug. Confirmed this by waiting long
+enough (~20s cumulative) for the same page to complete the full boot
+cycle. If a future session sees an apparent freeze while testing in this
+pane, check `document.hidden` / `tabs_context`'s "pane is hidden" note
+before concluding the app is broken.
 
 ## Known stale / not broken but wrong
 
-- **README.md is out of date.** It describes an earlier architecture:
-  - References CRT scanline/vignette overlay and gyroscope tilt — both were
-    *removed* in commit `4c49887` ("...remove CRT effects"). No gyroscope
-    code exists in `index.html` at all (verified: no
-    `DeviceOrientationEvent` references).
-  - Tells the reader to open `chunky-matrix.html` — the actual file was
-    renamed to `index.html` back in commit `9570d49` (for GitHub Pages).
+- **README.md is out of date.** Not touched this session (deferred, per
+  task order — do this next, see below).
+  - References CRT scanline/vignette overlay and gyroscope tilt — both
+    *removed* in commit `4c49887`. No `DeviceOrientationEvent` code exists
+    in `index.html`.
+  - Tells the reader to open `chunky-matrix.html` — renamed to
+    `index.html` in commit `9570d49`.
   - Doesn't mention the boot sequence at all, which is now most of the
-    file and most of the recent commit history (BASIC loader, PETSCII
-    chaos, LOAD typing animation, palette tap/hold controls, sound).
-  - Byline says "Browser port by Claude Sonnet 4.6" — doesn't reflect
-    whichever model(s) did the boot-sequence work in later commits.
-  - **Do not trust README.md as a description of current behavior.** It
-    needs a rewrite, not a patch, once the boot-freeze bug above is fixed.
+    file and most of the recent commit history.
+  - Byline says "Browser port by Claude Sonnet 4.6" — stale.
+  - **Do not trust README.md as a description of current behavior.**
 
 ## Settled decisions (don't re-litigate)
 
 - Single unified canvas/grid for both boot text and rain, not two
-  renderers (`d1a0441`). Reusing `drawCh`/`printAt`/`grid` for boot text
-  was deliberate so both share exact cell sizing.
+  renderers (`d1a0441`).
 - CRT scanline/vignette overlay was tried and explicitly removed
   (`4c49887`) in favor of just the soundtrack — don't re-add without
   checking why it was pulled.
 - No build step, no framework, no bundler. Stays a single `index.html`.
-  Don't propose splitting into modules/a build pipeline unless asked.
 - Binary assets (font, soundtrack) are committed directly to the repo, not
-  via Git LFS or an external CDN. Nobody has flagged this as a problem yet,
-  but it's worth knowing before you `git clone` and wonder why it's 20MB.
-- 16-color "Pepto" C64 palette is fixed/canonical — pulled from the actual
-  C64 hex reference, not made up.
+  via Git LFS or an external CDN — flagged, not yet decided on.
+- 16-color "Pepto" C64 palette is fixed/canonical.
+- Header/boot single-line text (header, "64K RAM SYSTEM", "READY.") now
+  uses `printLine()` (truncates, never wraps) instead of `printAt()`
+  (wraps) — established this session, keep using `printLine` for any new
+  boot text that must land on an exact row.
+- Band-sync is genuinely experimental (see above) — don't treat the v1
+  constants as final without feedback.
 
-## Immediate next steps (pick one, don't do all)
+## Outstanding questions for PAUL-ERIC
 
-1. **Fix the boot-freeze crash.** This is the site being down in practice
-   (it never reaches the rain animation most users came for). Start with
-   `git show 0804cad -- index.html` to see exactly what the last commit
-   changed in `startBoot()`/`resize()`/`initColumns()`, and add the missing
-   wrap-handling for the header `printAt` call, or find the actual
-   COLS/grid mismatch.
-2. **Rewrite README.md** once the crash is fixed, to describe the actual
-   current architecture (boot state machine, unified grid, palette
-   cycling) instead of the pre-boot-sequence version.
+1. **Push to `origin/main`?** 5 commits sit local-only right now (STATE.md,
+   crash fix, header-wrap fix, band-sync v1 — see `git log` for the
+   full list by the time you read this). The live site is broken until
+   the crash fix ships. Waiting on explicit go-ahead before pushing.
+2. **Band-sync v1** (above) — keep, retune, or scrap for a different
+   shape?
+
+## Immediate next steps
+
+1. Get a push decision (see above) — the live site is down until the
+   crash fix ships.
+2. **Rewrite README.md** to describe the actual current architecture
+   (boot state machine, unified grid, palette cycling) instead of the
+   pre-boot-sequence version. Not started — next in the task queue.
 3. Decide whether the two large binaries (font `.ttf`, `.mp4` soundtrack)
-   should move to Git LFS or stay as-is — not urgent, just flagging it
-   exists as a decision.
+   should move to Git LFS or stay as-is — not urgent, just flagged.
 
 Don't start any of these without checking in — this file is a snapshot,
 not a plan.
