@@ -143,7 +143,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let cursorOn=true, lastCursorToggle=0;
   let loadDuration=0, matrixActive=false;
   let CMD_ROW=6, SEARCH_ROW=9;
-  const LOAD_CMD    = 'LOAD "CHUNKY_MATRIX",8,1';
+  const LOAD_CMD    = 'LOAD "CHUNKY-MATRIX",8,1';
   const TYPE_DELAY  = 130; // ms per keystroke
 
   // ── Rain state ────────────────────────────────────────────────────
@@ -350,7 +350,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
     } else if(bootState==='searching'){
       if(elapsed>350){
-        printAt(0,SEARCH_ROW,'SEARCHING FOR CHUNKY_MATRIX',LB);
+        printAt(0,SEARCH_ROW,'SEARCHING FOR CHUNKY-MATRIX',LB);
         bootState='found'; stateStart=now;
       }
 
