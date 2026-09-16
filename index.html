@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Chunky Matrix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 @font-face {
   font-family: 'BoutiqueBitmap9x9';
@@ -11,44 +13,28 @@
   font-weight: bold;
   font-display: block;
 }
-</style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
-<style>
 *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
-/* ── C64 SCREENFRAME — colour 14 Light Blue (#7070DE) ───────────── */
+/* C64 screenframe — colour 14 light blue */
 #c64-frame {
   position:fixed; inset:0;
-  background: #7070DE;
+  background:#7869C4;
   display:flex; flex-direction:column; align-items:stretch;
   padding: clamp(12px,2.8vw,36px);
-  transition: background 0.06s;   /* border register flicker */
 }
 
-/* ── C64 SCREEN AREA — colour 6 Dark Blue (#3535CA) ─────────────── */
+/* C64 screen area — colour 6 dark blue */
 #c64-screen-wrapper {
   flex:1; position:relative; overflow:hidden;
-  background:#3535CA;
+  background:#40318D;
 }
 
-/* Matrix rain canvas — fills the screen area exactly */
 #matrix-cvs {
   position:absolute; inset:0;
-  display:none;   /* hidden until loader fades */
 }
 
-/* C64 loader canvas — integer-scaled, centred, on top */
-#loader-cvs {
-  position:absolute;
-  image-rendering:pixelated;
-  image-rendering:-moz-crisp-edges;
-  image-rendering:crisp-edges;
-  transition: opacity 1.4s ease-in;
-}
-
-/* ── CONTROL STRIP — in the light-blue frame, below screen ───────── */
+/* Control strip in the frame */
 #c64-controls {
   flex-shrink:0;
   padding: clamp(4px,.8vw,9px) clamp(8px,1.8vw,18px);
@@ -67,7 +53,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 }
 #c64-controls input[type="checkbox"]:checked { background:rgba(180,180,255,.7); }
 #c64-controls input[type="checkbox"]:checked::after {
-  content:''; position:absolute; inset:2px; background:#3535CA;
+  content:''; position:absolute; inset:2px; background:#40318D;
   clip-path:polygon(20% 50%,40% 75%,80% 20%,80% 30%,40% 85%,20% 60%);
 }
 .ctrl-div { color:rgba(160,160,220,.4); }
@@ -77,14 +63,13 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 <div id="c64-frame">
   <div id="c64-screen-wrapper">
     <canvas id="matrix-cvs"></canvas>
-    <canvas id="loader-cvs"></canvas>
   </div>
   <div id="c64-controls">
     <label title="Katakana + kanji"><input type="checkbox" id="cb-zh" checked> 日 CJK</label>
     <span class="ctrl-div">|</span>
-    <label title="A–Z symbols"><input type="checkbox" id="cb-en" checked> ABC</label>
+    <label title="A-Z symbols"><input type="checkbox" id="cb-en" checked> ABC</label>
     <span class="ctrl-div">|</span>
-    <label title="Space Invader sprites"><input type="checkbox" id="cb-inv" checked> 👾</label>
+    <label title="Space Invaders"><input type="checkbox" id="cb-inv" checked> 👾</label>
     <span class="ctrl-div">|</span>
     <label title="Sound on/off"><input type="checkbox" id="cb-snd" checked> SND</label>
   </div>
@@ -93,252 +78,53 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 <script>
 'use strict';
 // ════════════════════════════════════════════════════════════════════
-// C64 LOADER  (preserved verbatim from c64_loader.html, with two
-//              modifications: setBorder → frames the #c64-frame div;
-//              after READY+RUN → fades loader and starts Matrix rain)
+// CHUNKY MATRIX — single canvas, boot sequence + rain in one IIFE
+// Boot text uses same chunky font & cell size as the Matrix rain.
+// Tap glyph → cycle head colour. Tap empty → cycle bg colour.
+// Tap frame border → cycle frame colour. All 16 C64 Pepto colours.
 // ════════════════════════════════════════════════════════════════════
-(function () {
+(function(){
 
-  const COLS=40, ROWS=25, CW=8, CH=8;
-  const BUF_W=COLS*CW, BUF_H=ROWS*CH;   // 320×200
-
+  // ── Pepto C64 palette (16 colours) ───────────────────────────────
   const PALETTE = [
     '#000000','#FFFFFF','#883932','#67B6BD',
     '#8B3F96','#55A049','#40318D','#BFCE72',
     '#8B5429','#574200','#B86962','#505050',
     '#787878','#94E089','#7869C4','#9F9F9F'
   ];
-  const BG_COLOR=6, BORDER_COLOR=14, TEXT_COLOR=14;
 
-  const NOISE_CHARS='\u2588\u2593\u2592\u2591\u259a\u259e\u259f\u2599\u259c\u259b\u2584\u2580\u258c\u2590\u25a0\u25a1\u25b2\u25bc\u25c6\u25c7\u25cf\u25cb\u2660\u2663\u2665\u2666\u263a\u263b@#%&*+=<>/\\|-_~^0123456789';
-  const TEXT_CHARS ='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .:*_>-';
-  const ALL_CHARS  =Array.from(new Set((NOISE_CHARS+TEXT_CHARS).split(''))).join('');
+  // Mutable colour indices — tap cycles through palette
+  let bgIdx    = 6;   // C64 colour 6 dark blue
+  let frameIdx = 14;  // C64 colour 14 light blue
+  let headIdx  = 1;   // white (Matrix head)
+  const TR1_IDX = 13; // light green  (trail -1)
+  const TR2_IDX =  5; // green        (trail -2)
+  const DIM_HEX = '#1d381d'; // dim — no palette entry
 
-  // Offscreen 320×200 buffer
-  const buf=document.createElement('canvas');
-  buf.width=BUF_W; buf.height=BUF_H;
-  const bctx=buf.getContext('2d');
-  bctx.imageSmoothingEnabled=false;
+  const bg   = () => PALETTE[bgIdx];
+  const head = () => PALETTE[headIdx];
+  const tr1  = () => PALETTE[TR1_IDX];
+  const tr2  = () => PALETTE[TR2_IDX];
+  const fCol = () => PALETTE[frameIdx];
 
-  const loader=document.getElementById('loader-cvs');
-  const lctx=loader.getContext('2d');
-  lctx.imageSmoothingEnabled=false;
+  // ── DOM ──────────────────────────────────────────────────────────
+  const cvs   = document.getElementById('matrix-cvs');
+  const ctx   = cvs.getContext('2d');
+  const frame = document.getElementById('c64-frame');
+  const snd   = document.getElementById('snd');
+  const cbZh  = document.getElementById('cb-zh');
+  const cbEn  = document.getElementById('cb-en');
+  const cbInv = document.getElementById('cb-inv');
+  const cbSnd = document.getElementById('cb-snd');
 
-  function resizeLoader() {
-    const wr=document.getElementById('c64-screen-wrapper').getBoundingClientRect();
-    const scale=Math.max(1,Math.min(Math.floor(wr.width/BUF_W),Math.floor(wr.height/BUF_H)));
-    loader.width =BUF_W*scale; loader.height=BUF_H*scale;
-    loader.style.width =BUF_W*scale+'px'; loader.style.height=BUF_H*scale+'px';
-    loader.style.left  =((wr.width -BUF_W*scale)/2)+'px';
-    loader.style.top   =((wr.height-BUF_H*scale)/2)+'px';
-    lctx.imageSmoothingEnabled=false;
-  }
-  window.addEventListener('resize', resizeLoader, {passive:true});
-  resizeLoader();
+  // ── Character sets ────────────────────────────────────────────────
+  const EN_CHARS    = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
+  const ZH_CHARS    = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ' +
+                      'マミムメモヤユヨラリルレロワヲン日月火水木金土山川田林森石人' +
+                      '口大小上下左右中白黒夜雨風空電雲星龍鬼神道';
+  const NOISE_CHARS = '█▓▒░▚▞▟▙▜▛▄▀▌▐■□▲▼◆◇●○♠♣♥♦☺☻@#%&*+=<>/\\|-_~^0123456789';
 
-  function buildMask(ch) {
-    const S=32;
-    const tmp=document.createElement('canvas'); tmp.width=S; tmp.height=S;
-    const tctx=tmp.getContext('2d');
-    tctx.clearRect(0,0,S,S);
-    tctx.fillStyle='#fff';
-    tctx.font='bold '+(S*0.9)+'px monospace';
-    tctx.textAlign='center'; tctx.textBaseline='middle';
-    tctx.fillText(ch,S/2,S/2+1);
-    const data=tctx.getImageData(0,0,S,S).data;
-    const block=S/CW, mask=new Uint8Array(CW*CH);
-    for(let gy=0;gy<CH;gy++) for(let gx=0;gx<CW;gx++){
-      let sum=0,count=0;
-      for(let by=0;by<block;by++) for(let bx=0;bx<block;bx++){
-        const px=gx*block+bx, py=gy*block+by;
-        sum+=data[(py*S+px)*4+3]; count++;
-      }
-      mask[gy*CW+gx]=(sum/count)>90?1:0;
-    }
-    return mask;
-  }
-
-  function hexToRgb(hex){const n=parseInt(hex.slice(1),16);return{r:(n>>16)&255,g:(n>>8)&255,b:n&255};}
-
-  const glyphCache={};
-  for(const ch of ALL_CHARS){
-    const mask=buildMask(ch); glyphCache[ch]=[];
-    for(let c=0;c<16;c++){
-      const gcv=document.createElement('canvas'); gcv.width=CW; gcv.height=CH;
-      const gctx=gcv.getContext('2d');
-      const img=gctx.createImageData(CW,CH);
-      const rgb=hexToRgb(PALETTE[c]);
-      for(let i=0;i<mask.length;i++){
-        const o=i*4;
-        if(mask[i]){img.data[o]=rgb.r;img.data[o+1]=rgb.g;img.data[o+2]=rgb.b;img.data[o+3]=255;}
-      }
-      gctx.putImageData(img,0,0);
-      glyphCache[ch][c]=gcv;
-    }
-  }
-
-  const screenChar =new Array(COLS*ROWS).fill(' ');
-  const screenColor=new Array(COLS*ROWS).fill(TEXT_COLOR);
-
-  function paintBg(){ bctx.fillStyle=PALETTE[BG_COLOR]; bctx.fillRect(0,0,BUF_W,BUF_H); }
-  function drawCell(idx){
-    const cx=(idx%COLS)*CW, cy=Math.floor(idx/COLS)*CH;
-    bctx.fillStyle=PALETTE[BG_COLOR]; bctx.fillRect(cx,cy,CW,CH);
-    const ch=screenChar[idx];
-    if(ch!==' '){ const g=glyphCache[ch]&&glyphCache[ch][screenColor[idx]]; if(g) bctx.drawImage(g,cx,cy); }
-  }
-  function clearScreen(){
-    for(let i=0;i<screenChar.length;i++){screenChar[i]=' ';screenColor[i]=TEXT_COLOR;}
-    paintBg();
-  }
-  function setCell(idx,ch,color){ screenChar[idx]=ch; screenColor[idx]=color; drawCell(idx); }
-  function printAt(col,row,str,color){
-    for(let i=0;i<str.length;i++){const idx=row*COLS+(col+i); if(idx<screenChar.length)setCell(idx,str[i],color);}
-  }
-
-  // Frame stays solid light blue — no colour changes during load
-  const frame=document.getElementById('c64-frame');
-  function setBorder(ci){ frame.style.background=PALETTE[ci]; }
-
-  function present(){ lctx.drawImage(buf,0,0,BUF_W,BUF_H,0,0,loader.width,loader.height); }
-
-  // ── State machine ────────────────────────────────────────────────
-  // boot → typing → searching → loading → ready
-  let state='boot', stateStart=0, loadDuration=0, sweepPtr=0;
-  let cursorOn=true, lastCursorToggle=0;
-  let typingPos=0, lastTypeTime=0;
-  let loaderRafId=null, loaderDone=false;
-
-  const LOAD_CMD = 'LOAD "CHUNKY_MATRIX",8,1';
-  const TYPE_DELAY = 130; // ms per keystroke — human pacing
-
-  function randRange(a,b){return a+Math.random()*(b-a);}
-  function randInt(a,b){return Math.floor(randRange(a,b+1));}
-  function randChar(set){return set[randInt(0,set.length-1)];}
-
-  function startSequence(){
-    clearScreen();
-    setBorder(BORDER_COLOR); // solid light blue frame, always
-
-    // ── C64 BASIC V2 boot header ─────────────────────────────────
-    printAt(4, 1, '**** COMMODORE 64 BASIC V2 ****', TEXT_COLOR);
-    printAt(0, 3, ' 64K RAM SYSTEM  38911 BASIC BYTES FREE', TEXT_COLOR);
-    printAt(0, 5, 'READY.', TEXT_COLOR);
-    // cursor at start of command line
-    setCell(6*COLS+0, '\u2588', TEXT_COLOR);
-
-    state='typing'; stateStart=performance.now();
-    typingPos=0; lastTypeTime=0;
-    present();
-  }
-
-  function loaderFinished(){
-    if(loaderDone) return; loaderDone=true;
-    setTimeout(()=>{
-      clearScreen(); setBorder(BORDER_COLOR);
-      printAt(0,1,'READY.',TEXT_COLOR);
-      setCell(2*COLS+0,'\u2588',TEXT_COLOR); present();
-      setTimeout(()=>{
-        // type RUN
-        printAt(0,2,'R',TEXT_COLOR); present();
-        setTimeout(()=>{ printAt(1,2,'U',TEXT_COLOR); present(); }, 90);
-        setTimeout(()=>{ printAt(2,2,'N',TEXT_COLOR); present(); }, 180);
-        setTimeout(()=>{ startMatrix(); }, 900);
-      }, 1200);
-    }, 500);
-  }
-
-  function tick(now){
-    loaderRafId=requestAnimationFrame(tick);
-    const elapsed=now-stateStart;
-
-    if(state==='typing'){
-      // Blink cursor while waiting
-      if(now-lastCursorToggle>350){
-        cursorOn=!cursorOn; lastCursorToggle=now;
-        setCell(6*COLS+typingPos, cursorOn?'\u2588':' ', TEXT_COLOR);
-      }
-      // Type next char
-      if(now-lastTypeTime>TYPE_DELAY && typingPos<LOAD_CMD.length){
-        // Erase cursor, write char, advance
-        setCell(6*COLS+typingPos, LOAD_CMD[typingPos], TEXT_COLOR);
-        typingPos++;
-        // Place cursor at new position
-        setCell(6*COLS+typingPos, '\u2588', TEXT_COLOR);
-        lastTypeTime=now;
-      }
-      if(typingPos>=LOAD_CMD.length && elapsed>LOAD_CMD.length*TYPE_DELAY+900){
-        // "Enter" pressed
-        setCell(6*COLS+typingPos,' ',TEXT_COLOR);
-        state='searching'; stateStart=now;
-      }
-
-    } else if(state==='searching'){
-      if(elapsed>200){
-        printAt(0,8,'SEARCHING FOR CHUNKY_MATRIX',TEXT_COLOR);
-        state='found'; stateStart=now;
-      }
-
-    } else if(state==='found'){
-      if(elapsed>1400){
-        printAt(0,10,'LOADING',TEXT_COLOR);
-        state='loading'; stateStart=now;
-        sweepPtr=0;
-        loadDuration=randRange(3500,8000);
-      }
-
-    } else if(state==='loading'){
-      // PETSCII chaos fills the 320×200 screen — frame stays solid light blue
-      const writes=randInt(20,50);
-      for(let w=0;w<writes;w++){
-        let idx=Math.random()<0.78
-          ? (sweepPtr=(sweepPtr+1)%screenChar.length, sweepPtr-1)
-          : randInt(0,screenChar.length-1);
-        setCell(idx, randChar(NOISE_CHARS), randInt(0,15));
-      }
-      // NO setBorder call — frame never flickers
-      if(elapsed>loadDuration){
-        state='ready'; stateStart=now;
-        clearScreen(); setBorder(BORDER_COLOR);
-        loaderFinished();
-      }
-
-    } else if(state==='ready'){
-      if(now-lastCursorToggle>400){
-        cursorOn=!cursorOn; lastCursorToggle=now;
-        setCell(3*COLS+0, cursorOn?'\u2588':' ', TEXT_COLOR);
-      }
-    }
-    present();
-  }
-
-  startSequence();
-  loaderRafId=requestAnimationFrame(tick);
-})();
-
-
-// ════════════════════════════════════════════════════════════════════
-// CHUNKY MATRIX RAIN — starts after the C64 boot sequence finishes
-// ════════════════════════════════════════════════════════════════════
-(function(){
-  const cvs = document.getElementById('matrix-cvs');
-  const ctx  = cvs.getContext('2d');
-
-  // Screen background (C64 colour 6 dark blue)
-  const C_BG   = '#40318D'; // Pepto C64 colour 6 (blue)
-  // Matrix trail colours
-  const C_HEAD = '#FFFFFF';   // white head
-  const C_TR1  = '#94E089';   // C64 colour 13 light green
-  const C_TR2  = '#55A049';   // C64 colour 5  green
-  const C_DIM  = '#2a5a28';   // dim green — last fade before erase
-
-  // Character sets
-  const EN_CHARS = '@ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*=';
-  const ZH_CHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ' +
-                   'マミムメモヤユヨラリルレロワヲン日月火水木金土山川田林森石人' +
-                   '口大小上下左右中白黒夜雨風空電雲星龍鬼神道';
-
-  // Space Invader sprite bitmaps (8×8, MSB=left)
+  // Space Invader bitmaps (8×8, MSB=left)
   const SPRITES = [
     [0b00100100,0b00011000,0b00111100,0b01101110,0b11111111,0b10111101,0b10000001,0b01100110],
     [0b00011000,0b00111100,0b01111110,0b11011011,0b11111111,0b00100100,0b01011010,0b10100101],
@@ -346,23 +132,29 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   ];
   const INV_SENTINELS = ['\x01','\x02','\x03'];
 
+  // ── Layout ───────────────────────────────────────────────────────
   let COLS=0, ROWS=0, CELL_W=0, CELL_H=0, FONT_PX=0;
-  let columns=[], grid=[];
-  let activeChars='';
+  let grid=[], columns=[], activeChars='';
 
-  // Checkbox controls
-  const cbZh  = document.getElementById('cb-zh');
-  const cbEn  = document.getElementById('cb-en');
-  const cbInv = document.getElementById('cb-inv');
+  // ── Boot state ────────────────────────────────────────────────────
+  // init → typing → searching → found → loading → ready → rain
+  let bootState='init', stateStart=0;
+  let typingPos=0, lastTypeTime=0;
+  let cursorOn=true, lastCursorToggle=0;
+  let loadDuration=0, matrixActive=false;
+  let CMD_ROW=6, SEARCH_ROW=9;
+  const LOAD_CMD    = 'LOAD "CHUNKY_MATRIX",8,1';
+  const TYPE_DELAY  = 130; // ms per keystroke
 
-  function rebuildChars(){
-    let s='';
-    if(cbEn.checked)  s+=EN_CHARS;
-    if(cbZh.checked)  s+=ZH_CHARS;
-    activeChars=s||EN_CHARS;
-  }
+  // ── Rain state ────────────────────────────────────────────────────
+  const FPS=20, STEP_MS=1000/FPS;
+  let lastT=0;
 
-  // "Chungus" cell sizing: ~8 columns on phone, more on desktop
+  // ── Helpers ───────────────────────────────────────────────────────
+  function randRange(a,b){ return a+Math.random()*(b-a); }
+  function randInt(a,b){ return Math.floor(randRange(a,b+1)); }
+
+  // ── Sizing ────────────────────────────────────────────────────────
   function chunkSize(){
     const W=window.innerWidth;
     const cols=Math.max(7,Math.floor(W/55));
@@ -370,42 +162,84 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     return {cw, ch:Math.round(cw*1.28)};
   }
 
+  function applyFont(){
+    const snap=Math.max(9,Math.round(FONT_PX/9)*9);
+    ctx.font=`bold ${snap}px 'BoutiqueBitmap9x9',"Press Start 2P",monospace`;
+    ctx.textAlign='center';
+    ctx.textBaseline='alphabetic';
+    ctx.imageSmoothingEnabled=false;
+  }
+
   function resize(){
     const wr=document.getElementById('c64-screen-wrapper').getBoundingClientRect();
     const {cw,ch}=chunkSize();
     CELL_W=cw; CELL_H=ch;
     FONT_PX=Math.max(8,Math.floor(cw*0.86));
-
     cvs.width =Math.round(wr.width);
     cvs.height=Math.round(wr.height);
-
     COLS=Math.ceil(cvs.width /CELL_W);
     ROWS=Math.ceil(cvs.height/CELL_H);
-
-    const snapPx=Math.max(9,Math.round(FONT_PX/9)*9);
-    ctx.font=`bold ${snapPx}px 'BoutiqueBitmap9x9', "Press Start 2P", monospace`;
-    ctx.textAlign    ='center';
-    ctx.textBaseline ='alphabetic';
-    ctx.imageSmoothingEnabled=false;
-
-    ctx.fillStyle=C_BG;
+    applyFont();
+    ctx.fillStyle=bg();
     ctx.fillRect(0,0,cvs.width,cvs.height);
-
-    grid   =Array.from({length:COLS},()=>new Array(ROWS).fill(' '));
+    grid=Array.from({length:COLS},()=>new Array(ROWS).fill(' '));
     columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
+    // Recompute boot row positions after resize
+    const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
+    SEARCH_ROW=CMD_ROW+wrapRows+1;
   }
 
-  function makeColumn(x){
-    const sp=(Math.random()*4|0)+1;
-    return{x, row:Math.random()*ROWS|0, speed:sp, delay:sp, len:(Math.random()*16|0)+6};
+  // ── Grid drawing ──────────────────────────────────────────────────
+  function fillBg(){
+    ctx.fillStyle=bg();
+    ctx.fillRect(0,0,cvs.width,cvs.height);
   }
 
-  // Draw a Space Invader sprite scaled to fill the cell
+  function clearGrid(){
+    for(let c=0;c<COLS;c++) for(let r=0;r<ROWS;r++) grid[c][r]=' ';
+    fillBg();
+  }
+
+  // Draw a single character into a grid cell
+  function drawCh(col,row,ch,color){
+    if(col<0||col>=COLS||row<0||row>=ROWS) return;
+    const px=col*CELL_W, py=row*CELL_H;
+    ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
+    grid[col][row]=ch;
+    if(ch===' ') return;
+    ctx.fillStyle=color;
+    ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
+  }
+
+  // Print a string left-to-right, wrapping at COLS
+  function printAt(col,row,str,color){
+    let c=col,r=row;
+    for(const ch of str){
+      drawCh(c,r,ch,color);
+      if(++c>=COLS){ c=0; r++; }
+    }
+  }
+
+  // ── Boot sequence ─────────────────────────────────────────────────
+  function startBoot(){
+    frame.style.background=fCol();
+    clearGrid();
+    const LB=PALETTE[14]; // light blue for text
+    printAt(0,0,'**** C64 BASIC V2 ****',LB);
+    printAt(0,2,'64K RAM SYSTEM',LB);
+    printAt(0,4,'READY.',LB);
+    drawCh(0,CMD_ROW,'█',LB);        // cursor before LOAD cmd
+    bootState='typing';
+    stateStart=performance.now();
+    typingPos=0; lastTypeTime=0;
+  }
+
+  // ── Sprites ───────────────────────────────────────────────────────
   function drawSprite(c,r,color,si){
     if(c<0||c>=COLS||r<0||r>=ROWS) return;
     const bmp=SPRITES[si%SPRITES.length];
     const px=c*CELL_W, py=r*CELL_H;
-    ctx.fillStyle=C_BG; ctx.fillRect(px,py,CELL_W,CELL_H);
+    ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
     const pw=Math.max(1,Math.floor(CELL_W/8));
     const ph=Math.max(1,Math.floor(CELL_H/8));
     const ox=Math.floor((CELL_W-pw*8)/2);
@@ -421,27 +255,36 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     grid[c][r]=INV_SENTINELS[si%3];
   }
 
+  // ── Rain helpers ──────────────────────────────────────────────────
+  function rebuildChars(){
+    let s='';
+    if(cbEn.checked) s+=EN_CHARS;
+    if(cbZh.checked) s+=ZH_CHARS;
+    activeChars=s||EN_CHARS;
+  }
+
   function randHeadChar(){
-    if(cbInv.checked && Math.random()<(1/6)){
-      return INV_SENTINELS[Math.floor(Math.random()*3)];
-    }
+    if(cbInv.checked&&Math.random()<1/6) return INV_SENTINELS[Math.random()*3|0];
     return activeChars[Math.random()*activeChars.length|0]||'@';
   }
 
-  function drawCell(c,r,ch,color,glow){
+  function makeColumn(x){
+    const sp=(Math.random()*4|0)+1;
+    return{x,row:Math.random()*ROWS|0,speed:sp,delay:sp,len:(Math.random()*16|0)+6};
+  }
+
+  function drawCell(c,r,ch,color){
     if(c<0||c>=COLS||r<0||r>=ROWS) return;
     const px=c*CELL_W, py=r*CELL_H;
-    ctx.shadowBlur=0;
-    ctx.fillStyle=C_BG; ctx.fillRect(px,py,CELL_W,CELL_H);
-    if(ch===' '){ grid[c][r]=' '; return; }
+    ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
+    grid[c][r]=ch;
+    if(ch===' ') return;
     const si=INV_SENTINELS.indexOf(ch);
     if(si>=0){ drawSprite(c,r,color,si); return; }
     ctx.fillStyle=color;
     ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
-    grid[c][r]=ch;
   }
 
-  // Colour-only repaint — mirrors C64 colour-RAM-only writes
   function recolour(c,r,color){
     if(c<0||c>=COLS||r<0||r>=ROWS) return;
     const ch=grid[c][r];
@@ -449,13 +292,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     const si=INV_SENTINELS.indexOf(ch);
     if(si>=0){ drawSprite(c,r,color,si); return; }
     const px=c*CELL_W, py=r*CELL_H;
-    ctx.fillStyle=C_BG; ctx.fillRect(px,py,CELL_W,CELL_H);
+    ctx.fillStyle=bg(); ctx.fillRect(px,py,CELL_W,CELL_H);
     ctx.fillStyle=color;
     ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
   }
-
-  const FPS=20, STEP_MS=1000/FPS;
-  let lastT=0;
 
   function updateMatrix(){
     for(let x=0;x<COLS;x++){
@@ -467,59 +307,147 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
         col.delay=col.speed; col.len=(Math.random()*16|0)+6;
       }
       const r=col.row;
-      drawCell  (x, r-col.len,     ' ',    C_BG);
-      recolour  (x, r-col.len+1,           C_DIM);
-      recolour  (x, r-2,                   C_TR2);
-      recolour  (x, r-1,                   C_TR1);
+      drawCell(x,r-col.len,' ',bg());
+      recolour(x,r-col.len+1,DIM_HEX);
+      recolour(x,r-2,tr2());
+      recolour(x,r-1,tr1());
       const ch=randHeadChar();
       const si=INV_SENTINELS.indexOf(ch);
-      if(si>=0) drawSprite(x,r,C_HEAD,si);
-      else      drawCell  (x,r,ch,C_HEAD,true);
+      if(si>=0) drawSprite(x,r,head(),si);
+      else      drawCell(x,r,ch,head());
     }
   }
 
-  function frame(t){
-    requestAnimationFrame(frame);
-    if(t-lastT<STEP_MS) return;
-    lastT=t-((t-lastT)%STEP_MS);
-    updateMatrix();
+  // ── Main loop ─────────────────────────────────────────────────────
+  function tick(now){
+    requestAnimationFrame(tick);
+    const elapsed=now-stateStart;
+    const LB=PALETTE[14];
+
+    if(bootState==='typing'){
+      // Cursor blink
+      if(now-lastCursorToggle>350){
+        cursorOn=!cursorOn; lastCursorToggle=now;
+        const cc=typingPos%COLS, cr=CMD_ROW+Math.floor(typingPos/COLS);
+        drawCh(cc,cr,cursorOn?'█':' ',LB);
+      }
+      // Type next character
+      if(now-lastTypeTime>TYPE_DELAY&&typingPos<LOAD_CMD.length){
+        const cc=typingPos%COLS, cr=CMD_ROW+Math.floor(typingPos/COLS);
+        drawCh(cc,cr,LOAD_CMD[typingPos],LB);
+        typingPos++;
+        const nc=typingPos%COLS, nr=CMD_ROW+Math.floor(typingPos/COLS);
+        drawCh(nc,nr,'█',LB);
+        lastTypeTime=now;
+      }
+      // Enter pressed — wait a beat then proceed
+      if(typingPos>=LOAD_CMD.length&&elapsed>LOAD_CMD.length*TYPE_DELAY+900){
+        // erase trailing cursor
+        const nc=typingPos%COLS, nr=CMD_ROW+Math.floor(typingPos/COLS);
+        drawCh(nc,nr,' ',LB);
+        bootState='searching'; stateStart=now;
+      }
+
+    } else if(bootState==='searching'){
+      if(elapsed>350){
+        printAt(0,SEARCH_ROW,'SEARCHING FOR CHUNKY_MATRIX',LB);
+        bootState='found'; stateStart=now;
+      }
+
+    } else if(bootState==='found'){
+      if(elapsed>1600){
+        const loadRow=SEARCH_ROW+Math.ceil(28/COLS)+1;
+        printAt(0,loadRow,'LOADING',LB);
+        bootState='loading'; stateStart=now;
+        loadDuration=randRange(3500,8000);
+      }
+
+    } else if(bootState==='loading'){
+      // PETSCII chaos — fill random chunky cells in random C64 colours
+      const writes=randInt(8,20);
+      for(let w=0;w<writes;w++){
+        const c=Math.floor(Math.random()*COLS);
+        const r=Math.floor(Math.random()*ROWS);
+        const ch=NOISE_CHARS[Math.floor(Math.random()*NOISE_CHARS.length)];
+        drawCh(c,r,ch,PALETTE[Math.floor(Math.random()*16)]);
+      }
+      if(elapsed>loadDuration){
+        clearGrid();
+        printAt(0,1,'READY.',LB);
+        drawCh(0,3,'█',LB);
+        bootState='ready'; stateStart=now; cursorOn=true;
+      }
+
+    } else if(bootState==='ready'){
+      // Cursor blink
+      if(now-lastCursorToggle>400){
+        cursorOn=!cursorOn; lastCursorToggle=now;
+        drawCh(0,3,cursorOn?'█':' ',LB);
+      }
+      // Type R·U·N
+      if(elapsed>1200) drawCh(0,4,'R',LB);
+      if(elapsed>1290) drawCh(1,4,'U',LB);
+      if(elapsed>1380) drawCh(2,4,'N',LB);
+      if(elapsed>2200){
+        bootState='rain'; stateStart=now;
+        matrixActive=true;
+        rebuildChars();
+        clearGrid();
+        columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
+        if(cbSnd.checked) snd.play().catch(()=>{});
+      }
+
+    } else if(bootState==='rain'){
+      if(now-lastT>=STEP_MS){
+        lastT=now-((now-lastT)%STEP_MS);
+        updateMatrix();
+      }
+    }
   }
 
-  // Checkbox changes rebuild the active character pool
+  // ── Tap to cycle colours ─────────────────────────────────────────
+  // Tap a character → cycle Matrix head colour
+  // Tap empty area  → cycle background colour
+  // Tap frame border (outside screen) → cycle frame colour
+  cvs.addEventListener('click', e=>{
+    if(!matrixActive) return;
+    const c=Math.floor(e.offsetX/CELL_W);
+    const r=Math.floor(e.offsetY/CELL_H);
+    const ch=(c>=0&&c<COLS&&r>=0&&r<ROWS)?grid[c][r]:' ';
+    if(ch!==' '&&!INV_SENTINELS.includes(ch)){
+      headIdx=(headIdx+1)%16;
+    } else {
+      bgIdx=(bgIdx+1)%16;
+      fillBg();
+    }
+  });
+
+  frame.addEventListener('click', e=>{
+    if(!matrixActive) return;
+    if(e.target.closest('#c64-screen-wrapper')) return;
+    if(e.target.closest('#c64-controls')) return;
+    frameIdx=(frameIdx+1)%16;
+    frame.style.background=fCol();
+  });
+
+  // ── Checkbox listeners ────────────────────────────────────────────
   [cbZh,cbEn,cbInv].forEach(cb=>cb.addEventListener('change',rebuildChars));
+  cbSnd.addEventListener('change',()=>{ cbSnd.checked?snd.play().catch(()=>{}):snd.pause(); });
+  document.addEventListener('click',()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); },{once:true});
 
-  // ── Sound control ────────────────────────────────────────────────
-  const snd   = document.getElementById('snd');
-  const cbSnd = document.getElementById('cb-snd');
-
-  function applySound(){
-    if(cbSnd.checked){ snd.play().catch(()=>{}); }
-    else { snd.pause(); }
-  }
-  cbSnd.addEventListener('change', applySound);
-  // Also wire any user gesture on the page to unblock autoplay
-  document.addEventListener('click', ()=>{ if(cbSnd.checked) snd.play().catch(()=>{}); }, {once:true});
-
-  // Resize matrix canvas when window resizes (only while visible)
   window.addEventListener('resize',()=>{
-    if(cvs.style.display!=='none'){ resize(); }
+    resize();
+    if(bootState==='rain'){
+      columns=Array.from({length:COLS},(_,i)=>makeColumn(i));
+    }
   },{passive:true});
 
-  // Called by the C64 loader IIFE after READY+RUN completes
-  window.startMatrix=function(){
-    // Attempt autoplay; user can toggle SND if browser blocks it
-    const _snd=document.getElementById('snd');
-    const _cbSnd=document.getElementById('cb-snd');
-    if(_cbSnd.checked) _snd.play().catch(()=>{});
-    rebuildChars();
+  // ── Start — wait for fonts ────────────────────────────────────────
+  document.fonts.ready.then(()=>{
     resize();
-    const loader=document.getElementById('loader-cvs');
-    loader.style.opacity='0';
-    cvs.style.display='block';
-    setTimeout(()=>{ loader.style.display='none'; }, 1500);
-    lastT=0;
-    requestAnimationFrame(frame);
-  };
+    startBoot();
+    requestAnimationFrame(tick);
+  });
 
 })();
 </script>
