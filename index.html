@@ -448,8 +448,17 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   },{passive:true});
 
   // ── Start — wait for fonts ────────────────────────────────────────
-  document.fonts.ready.then(()=>{
+  // Use document.fonts.load() with the exact weight/size rather than
+  // document.fonts.ready — the latter resolves as soon as the font *exists*
+  // in the registry, before the first glyph is decoded.  fonts.load() blocks
+  // until the face is fully decoded and ready to paint.  The off-screen
+  // fillText warm-up then forces a real rasterise pass so the very first
+  // visible character (the 'L' in 'LOAD') is guaranteed to use the bitmap
+  // font rather than the system monospace fallback.
+  document.fonts.load("bold 18px 'BoutiqueBitmap9x9'").then(()=>{
     resize();
+    // Warm-up: force glyph decode before any visible character is drawn
+    ctx.fillText('A', -100, -100);
     startBoot();
     requestAnimationFrame(tick);
   });
