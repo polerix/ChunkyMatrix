@@ -145,6 +145,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   // ── Layout ───────────────────────────────────────────────────────
   let COLS=0, ROWS=0, CELL_W=0, CELL_H=0, FONT_PX=0;
+  let CSS_W=0, CSS_H=0; // drawable size in CSS px (canvas backing store is CSS_W/H * devicePixelRatio)
   let grid=[], columns=[], activeChars='';
 
   // ── Boot state ────────────────────────────────────────────────────
@@ -170,10 +171,18 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   function randInt(a,b){ return Math.floor(randRange(a,b+1)); }
 
   // ── Sizing ────────────────────────────────────────────────────────
-  function chunkSize(){
-    const W=window.innerWidth;
-    const cols=Math.max(7,Math.floor(W/55));
-    const cw=Math.floor(W/cols);
+  // Cell width scales with the actual drawable (CSS px) width, not a fixed
+  // desktop-tuned divisor — the old `Math.floor(W/55)` gave a flat ~55px
+  // cell at ANY width, so a 390px phone got exactly 7 giant columns (the
+  // same 7 you'd get from a 500px desktop window). targetCols grows with W
+  // but is clamped on both ends: floor of 24 guarantees the 22-char boot
+  // header ("**** C64 BASIC V2 ****") always fits with margin, even at a
+  // 320px-wide phone after frame padding eats into it; ceiling of 34 keeps
+  // cells "chunky" (this is Chunky Matrix) instead of shrinking to normal
+  // terminal density on a large desktop window.
+  function chunkSize(W){
+    const targetCols=Math.max(24,Math.min(34,Math.round(W/16)));
+    const cw=Math.max(9,Math.floor(W/targetCols));
     return {cw, ch:Math.round(cw*1.28)};
   }
 
@@ -192,16 +201,25 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   function resize(){
     const wr=document.getElementById('c64-screen-wrapper').getBoundingClientRect();
     if(wr.width<1||wr.height<1) return false;
-    const {cw,ch}=chunkSize();
+    CSS_W=wr.width; CSS_H=wr.height;
+    const {cw,ch}=chunkSize(CSS_W);
     CELL_W=cw; CELL_H=ch;
     FONT_PX=Math.max(8,Math.floor(cw*0.86));
-    cvs.width =Math.round(wr.width);
-    cvs.height=Math.round(wr.height);
-    COLS=Math.ceil(cvs.width /CELL_W);
-    ROWS=Math.ceil(cvs.height/CELL_H);
+    // Canvas backing store is sized in device pixels (CSS px * DPR) so text
+    // renders crisp on a HiDPI/Retina screen instead of soft/blurry — the
+    // element's on-screen CSS size still comes from #matrix-cvs{inset:0}
+    // filling the wrapper, unaffected by these attribute values. All draw
+    // calls keep using CSS-px coordinates (CELL_W/H, CSS_W/H, etc.); the
+    // transform below scales them into the higher-res backing store.
+    const dpr=window.devicePixelRatio||1;
+    cvs.width =Math.round(CSS_W*dpr);
+    cvs.height=Math.round(CSS_H*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    COLS=Math.ceil(CSS_W/CELL_W);
+    ROWS=Math.ceil(CSS_H/CELL_H);
     applyFont();
     ctx.fillStyle=bg();
-    ctx.fillRect(0,0,cvs.width,cvs.height);
+    ctx.fillRect(0,0,CSS_W,CSS_H);
     initColumns();
     // Recompute boot row positions after resize
     const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
@@ -212,7 +230,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   // ── Grid drawing ──────────────────────────────────────────────────
   function fillBg(){
     ctx.fillStyle=bg();
-    ctx.fillRect(0,0,cvs.width,cvs.height);
+    ctx.fillRect(0,0,CSS_W,CSS_H);
   }
 
   function clearGrid(){
