@@ -354,9 +354,12 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     rainFrame++;
     for(let x=0;x<COLS;x++){
       const col=columns[x];
-      // Wave-band: columns in the same band share a phase; the crest gives
-      // them an occasional extra tick so they surge together like a wave.
-      const waveBoost=Math.sin(rainFrame*0.05-col.x*0.25)>0.82?1:0;
+      // Wave-band (experimental, v1): the 4 bands assigned in makeColumn()
+      // get evenly-spaced phase offsets, so each band crests in turn and
+      // gets an occasional extra tick — a visible wave sweeping through 4
+      // discrete groups, not a per-column gradient. col.band was set but
+      // unused before this; iterate on the constants below by feel.
+      const waveBoost=Math.sin(rainFrame*0.05+col.band*(Math.PI/2))>0.82?1:0;
       col.delay=Math.max(0,col.delay-1-waveBoost);
       if(col.delay>0) continue;
       col.delay=col.speed; col.row++;
