@@ -4,8 +4,8 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes,
-> real-device mobile bug round 2 + debug overlay).
+> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile fixes
+> rounds 1-3, debug overlay).
 
 ## What this is
 
@@ -70,12 +70,27 @@ column per step).
   iPhone" report — see below, don't remove that CSS rule.
 - `resize()` returns `false` and touches no state if the wrapper is still
   a 0×0 rect (see crash-fix section below) — callers must check this.
-- **`?debug=1`**: on-screen readout (top of viewport) of every width/
-  height signal in the layout chain — devicePixelRatio, innerWidth/Height,
-  visualViewport, wrapper rect + clientWidth, canvas CSS size vs backing
-  store, CELL_W/H, COLS/ROWS, bootState. Polls every 1s (iOS doesn't
-  always fire `resize` on address-bar collapse). Zero effect without the
-  query param. Permanent diagnostic tool, not a one-off — keep it.
+- **What triggers `resize()`**: a `ResizeObserver` on `#c64-screen-wrapper`
+  (NOT a `window resize`/`orientationchange` listener — round 3 found
+  those fire before Safari's dynamic toolbar/safe-area has settled into
+  its final size, especially post-rotation, leaving `CSS_W`/`CSS_H` stale
+  relative to the wrapper's true final size). Falls back to a `window
+  resize` listener only if `ResizeObserver` doesn't exist (essentially
+  never, in 2026). A `requestAnimationFrame`-deferred extra `resize()`
+  call rides along as a one-more-frame settle backstop.
+- **`COLS`/`ROWS` use `Math.floor`, not `Math.ceil`** — round 3 found real
+  overflow (`COLS*CELL_W` exceeding the canvas's actual CSS width) from
+  the old ceil. Floor leaves at most one cell of solid background at the
+  far edge instead; never draws past the edge. `chunkSize`'s column clamp
+  guarantees this can't drop `COLS` below the 22-char-header floor.
+- **`?debug=1`**: on-screen readout (top of viewport, semi-transparent so
+  the rendering underneath stays visible) of every width/height signal in
+  the layout chain — devicePixelRatio, innerWidth/Height, visualViewport,
+  wrapper rect + clientWidth, canvas CSS size vs backing store, CELL_W/H,
+  COLS/ROWS, bootState. Polls every 1s as a backstop. Zero effect without
+  the query param. Permanent diagnostic tool, not a one-off — keep it. It
+  is, as of round 3, the thing that actually found both real bugs; trust
+  its numbers over any emulated test in this repo.
 - **Rain**: each column is `{x, row, speed, delay, len, band}`. `band` is
   `x % 4` (4 groups); `updateMatrix()` gives each band an identical phase
   offset so columns in the same band crest together — a real synced-wave
@@ -97,17 +112,20 @@ column per step).
 
 README.md does not track any of this — see "Known stale" below.
 
-## Current status: fix #2 pushed, NOT yet confirmed on the real device
+## Current status: fix #3 pushed, NOT yet confirmed on the real device
 
-`origin/main` is at `78822a5`. GitHub Pages redeploy not yet verified in
-this pass — do that next (see "Immediate next steps"). This is the
-**second** attempt at the mobile bug; the first attempt (`c19602d`/
-`0d96c48`, "fixed and verified" in an earlier version of this file) was
-**wrong** — PAUL-ERIC tested it on his actual iPhone 17 Pro (iOS 26, DPR
-3, both Safari and Chrome) and it was still broken, in both orientations.
-That earlier "verified" claim was emulation-only and the emulation was
-hiding the real bug (see below). **Don't trust emulated verification
-alone for this bug class — load `?debug=1` on the actual device.**
+`origin/main` is at `05645c6` (verify this matches the deployed hash —
+see "Immediate next steps", not yet done this pass). **Third** attempt at
+the mobile bug. Track record, plainly: round 1 (`c19602d`/`0d96c48`)
+"fixed and verified" — wrong, real device still broken. Round 2
+(`78822a5`) "fixed and verified" — PAUL-ERIC's own `?debug=1` readout
+from his iPhone 17 Pro (DPR3) proved round 2's canvas-box-size fix DID
+work (canvas CSS size == wrapper, confirmed both orientations) but caught
+a second, independent bug round 2's emulation never surfaced. Round 3
+(`05645c6`, this update) fixes that second bug. **Given the track record,
+treat round 3 as "fixes the specific defect the round-2 device readout
+proved," not as "confirmed working" — that word is earned by the next
+`?debug=1` readout from the device, not by anything in this file.**
 
 ## Fixed this session (round 2): the REAL mobile bug — canvas box sizing
 
@@ -172,6 +190,75 @@ runs backgrounded (`document.hidden === true`) and its `screenshot` tool
 has been caught serving a stale composite of canvas content. Prefer
 `getBoundingClientRect`/`getImageData`/direct state reads over
 screenshots when verifying canvas-rendered content in this environment.
+
+## Fixed this session (round 3): stale CSS_W/CSS_H from window 'resize'
+
+PAUL-ERIC's `?debug=1` readout from his iPhone 17 Pro (DPR3) after round 2
+shipped: canvas CSS size now correctly equalled the wrapper in both
+orientations (round 2's fix held) — but `CSS_W`/`CSS_H` ("what resize()
+measured") disagreed with a fresh `getBoundingClientRect()` of the SAME
+wrapper element, read moments later in the same debug line:
+
+- Portrait: measured 254×712, actual (per the wrapper's own rect, same
+  readout) 378×634.
+- Landscape: measured 708×610, actual 708×272 — width right, height very
+  wrong.
+
+Root cause: `window.addEventListener('resize', () => resize())` fires
+when the browser dispatches the event, which is not guaranteed to be
+*after* the layout is done changing. On iOS Safari specifically, the
+dynamic toolbar/safe-area can still be animating/settling into its final
+size when `resize` fires — especially right after an orientation change —
+so `resize()` captured a transient, not-yet-final layout and then simply
+never got called again once the toolbar finished settling (no further
+`resize` event fired for that).
+
+This was consequential, not cosmetic: `COLS`/`ROWS` (and everything drawn)
+were being computed against the WRONG `CSS_W`/`CSS_H`, independent of the
+round-2 canvas-box-size bug. Portrait: `COLS*CELL_W = 260` against an
+actual 378px-wide canvas — 118px of dead space, matching "rain columns
+stop about two-thirds across." Landscape: `ROWS*CELL_H = 624` crammed into
+a 272px-tall canvas — only ~10 of 24 computed rows fit, matching "thin
+band of rain and nothing else."
+
+Fix: replaced the `window resize` listener with a `ResizeObserver` on
+`#c64-screen-wrapper`. `ResizeObserver` is specified to fire strictly
+after layout, reporting the box's actual settled size — the right signal
+structurally, not a heuristic that happens to usually correlate with it.
+Chose the wrapper over the canvas to avoid the canvas's own `width`/
+`height` attribute writes (inside `resize()`) potentially self-triggering
+notifications. Kept a `requestAnimationFrame`-deferred extra `resize()`
+call riding along as a backstop for a possible further single-frame
+settle.
+
+Separately, same commit: `COLS`/`ROWS` switched `Math.ceil`→`Math.floor`.
+The landscape readout showed `COLS*CELL_W=720` against a 708px canvas —
+real overflow past the edge, not a rounding nicety. Verified this can't
+regress the 22-char-header-fit requirement: `chunkSize`'s column clamp
+guarantees `CSS_W/cw >= targetCols(>=24)` by construction, so
+`floor(CSS_W/cw) >= 24` always holds.
+
+**Verification, and its limits.** Replicated the exact reported device
+readings in emulation (402×676 portrait, 750×338 landscape, DPR3
+override) and drove a full rotation cycle (portrait→landscape→portrait),
+asserting after each: `CSS_W`/`CSS_H` exactly matches a fresh
+`getBoundingClientRect()` of the wrapper (the precise mismatch reported),
+and `COLS*CELL_W`/`ROWS*CELL_H` never exceed the canvas's actual CSS size.
+Passed, both directions. Hit yet another instance of this session's
+recurring pane-hidden-throttling problem while testing: the
+`ResizeObserver` notification for a `resize_window`-tool-driven viewport
+change took ~25s to arrive while the pane was backgrounded. Ran a control
+test first — a plain `ResizeObserver` on a directly-`style`-mutated test
+div fired within 200ms in the same hidden pane — which shows `RO` isn't
+universally suppressed there, just unusually slow for this specific
+viewport-driven delivery path while backgrounded. Not expected to
+reproduce on an actively-viewed real screen (nothing throttles rendering
+for a page someone is actually looking at), but this is exactly the kind
+of gap between "emulation says X" and "device says Y" that's bitten this
+project twice already — flagged, not asserted away. **The mechanism is
+verified correct; its timing on a real, foregrounded device is not
+something this harness can measure, and only the next on-device
+`?debug=1` readout settles it.**
 
 ## Fixed this session (part 1): boot-freeze crash (root cause)
 
@@ -264,6 +351,13 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
   `getImageData`/ink-stripe check of the canvas's own buffer is blind to
   on-screen box-size bugs by construction, proven by false-passing this
   exact bug in round 1.
+- **Sizing is driven by `ResizeObserver` on the wrapper, not `window
+  resize`/`orientationchange`.** Don't revert to an event listener —
+  those can fire before iOS Safari's dynamic toolbar has settled into its
+  final size, which is exactly what round 3 was.
+- `COLS`/`ROWS` use `Math.floor`, never `Math.ceil` — content must never
+  exceed the drawable CSS area, a few px of background margin at the edge
+  is fine, overflow past the edge is not.
 - `#colour-hint` lives inside `#c64-screen-wrapper` as `position:absolute`
   — don't move it back to a viewport-fixed position, that's what caused
   the HUD collision on mobile.
@@ -277,23 +371,27 @@ phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
 ## Outstanding questions for PAUL-ERIC
 
 1. **Load `https://polerix.github.io/ChunkyMatrix/?debug=1` on the iPhone
-   17 Pro that reported the bug** (both orientations) and report back the
-   numbers, or just whether it visually looks right now. This is the
-   actual ground truth this whole round was about getting — everything
-   above is emulated, and emulation already misled once on this exact bug.
+   17 Pro again** (both orientations, after rotating at least once so the
+   ResizeObserver path actually gets exercised) and report back the
+   numbers, or just whether it visually looks right. Round 3 fixes the
+   exact defect round 2's device readout proved existed; it has not been
+   re-confirmed on-device yet.
 2. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
    from round 1) — acceptable, or keep desktop chunkier?
 3. **Band-sync v1** — keep, retune, or scrap for a different shape?
 
 ## Immediate next steps
 
-1. Verify GitHub Pages redeployed `78822a5` and the live URL serves it
-   (byte-for-byte check + build-status API, same method as prior pushes)
-   — not yet done this pass.
+1. Verify GitHub Pages redeployed `05645c6` and the live URL serves it
+   byte-for-byte (same method as prior pushes: build-status API + curl
+   diff against local HEAD) — not yet done this pass.
 2. Get PAUL-ERIC's on-device confirmation (see above) before considering
-   the mobile bug closed.
+   the mobile bug closed. Given the round 1→2 track record, a THIRD
+   "looks fixed in emulation" claim without device confirmation should
+   carry zero weight on its own.
 3. **Rewrite README.md** — next in queue, not started. Should now also
-   describe the responsive sizing, DPR handling, and `?debug=1`.
+   describe the responsive sizing, DPR handling, ResizeObserver-driven
+   layout, and `?debug=1`.
 4. Decide on Git LFS for the two large binaries — not urgent, flagged.
 
 Don't start any of these without checking in — this file is a snapshot,
