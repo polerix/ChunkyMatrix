@@ -208,6 +208,11 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     grid[col][row]=ch;
     if(ch===' ') return;
     ctx.fillStyle=color;
+    // '█' rendered via fillText can overflow the cell bottom by the font's
+    // descent, leaving a persistent 1-2 px stripe that looks like an underline
+    // under every character the cursor visited.  Draw it as a fillRect instead
+    // so it is always strictly contained within (px, py, CELL_W, CELL_H).
+    if(ch==='█'){ ctx.fillRect(px,py,CELL_W,CELL_H); return; }
     ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
   }
 
