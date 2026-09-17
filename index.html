@@ -611,6 +611,14 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       if(now-lastT>=STEP_MS){
         lastT=now-((now-lastT)%STEP_MS);
         updateMatrix();
+        // CJK and symbol glyphs can bleed pixels below the alphabetic baseline
+        // into the strip between ROWS*CELL_H and CSS_H (and past COLS*CELL_W
+        // on the right). Those pixels are never cleared by cell drawing, so
+        // we erase the strips back to bg() after every matrix step.
+        ctx.fillStyle=bg();
+        const gB=ROWS*CELL_H, gR=COLS*CELL_W;
+        if(gB<CSS_H) ctx.fillRect(0,gB,CSS_W,CSS_H-gB);
+        if(gR<CSS_W) ctx.fillRect(gR,0,CSS_W-gR,CSS_H);
       }
     }
   }
