@@ -1,0 +1,5 @@
+{
+  "toolkit": "^1.1.0",
+  "features": ["web-core"],
+  "steward": { "skip": [] }
+}
