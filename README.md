@@ -70,11 +70,21 @@ Before the rain starts, a state machine (`init → waiting → typing → search
 3. `SEARCHING FOR CHUNKY-MATRIX` → `LOADING` → a PETSCII-noise sweep (linear, top-left to bottom-right, in screen-memory address order — not random placement) while random characters and colours fill the screen.
 4. `READY.` again, `RUN` typed, then the rain begins.
 
-On a short (landscape phone) viewport the row spacing compresses proportionally instead of the fixed authentic layout, so nothing renders off-screen.
+Boot text is printed through a cursor that wraps at the last column and scrolls at the last row, like the real C64 screen editor. On a tall grid (a phone in portrait) nothing scrolls and the layout is the authentic rows 2/5/7/9. On a short or chunky grid the blank spacing rows are squeezed out first, then the screen scrolls, so every line still prints in full. The 22-character header stays on one row at 22 or more columns and is word-wrapped (never truncated) below that, which is what a chunky desktop grid gets.
 
 ## Responsive Sizing & HiDPI
 
-Cell size is derived from the actual drawable area (the on-screen canvas's own CSS pixel size, not `window.innerWidth`), clamped to a column-count range that keeps the boot text's 22-character header readable at any width down to 320px while staying visibly "chunky" rather than shrinking to normal terminal density on a large desktop window. Height is factored in too, so a short (landscape) viewport doesn't get a cell tall enough to starve the row count.
+Cell size is derived from the actual drawable area (the on-screen canvas's own CSS pixel size, not `window.innerWidth`). The target column count **falls** as the drawable gets wider, so it is chunky when there is room and denser only when there has to be:
+
+| Drawable width | Target columns | Why |
+|----------------|----------------|-----|
+| ≤ 420px (phones) | 24 | The floor. Keeps the 22-character boot header on one row, untruncated, with margin at 320px CSS width. Never go below 22. |
+| ≥ 1000px (desktop) | 16 | Chunky: cells of roughly 60px at 1024 wide up to ~150px at 2560. |
+| in between | linear | Cell size grows smoothly with width. |
+
+A minimum row count also falls with height: 16 rows on a short viewport (phone in landscape, ≤ 400px tall) down to 7 on a tall one (≥ 560px), linear in between. The cell shrinks just enough for that many whole rows to fit. Typical desktop windows end up around 16–17 columns × 7 rows. Phones are unchanged.
+
+`COLS`/`ROWS` use `Math.floor`, so the grid never draws past the drawable edge.
 
 The canvas backing store is sized at `devicePixelRatio` for crisp text on Retina/HiDPI screens, independent of the CSS-pixel layout — one coordinate space (CSS pixels) for all layout math, one `ctx` transform for the DPR scale-up.
 

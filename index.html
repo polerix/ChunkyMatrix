@@ -221,14 +221,13 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let typingPos=0, lastTypeTime=0;
   let cursorOn=true, lastCursorToggle=0;
   let loadDuration=0, matrixActive=false;
-  let CMD_ROW=9, SEARCH_ROW=12;
-  // Boot-text row positions — adaptive, see computeBootRows(). Defaults
-  // are the authentic spacing, used whenever ROWS is tall enough for it.
-  let ROW_HEADER=2, ROW_RAM=5, ROW_READY=7;
+  // Boot console cursor (column,row) — see "Boot console" below.
+  let bc=0, br=0;
   // PETSCII linear sweep state
-  let chaosPos=0, chaosTotal=0, chaosBatch=0;
+  let chaosPos=0, chaosTotal=0, chaosBatch=0, chaosCarry=0;
   // rain frame counter (drives the travelling wave in updateMatrix)
   let rainFrame=0;
+  const BOOT_HEADER = '**** C64 BASIC V2 ****';
   const LOAD_CMD    = 'LOAD "CHUNKY-MATRIX",8,1';
   const TYPE_DELAY  = 130; // ms per keystroke
 
@@ -241,52 +240,72 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   function randInt(a,b){ return Math.floor(randRange(a,b+1)); }
 
   // ── Sizing ────────────────────────────────────────────────────────
-  // Cell width scales with the actual drawable (CSS px) width, not a fixed
-  // desktop-tuned divisor — the old `Math.floor(W/55)` gave a flat ~55px
-  // cell at ANY width, so a 390px phone got exactly 7 giant columns (the
-  // same 7 you'd get from a 500px desktop window). targetCols grows with W
-  // but is clamped on both ends: floor of 24 guarantees the 22-char boot
-  // header ("**** C64 BASIC V2 ****") always fits with margin, even at a
-  // 320px-wide phone after frame padding eats into it; ceiling of 34 keeps
-  // cells "chunky" (this is Chunky Matrix) instead of shrinking to normal
-  // terminal density on a large desktop window.
-  // H constrains the same cw: a short (landscape) viewport sized purely
-  // from width can end up with a cell tall enough that ROWS drops below
-  // what the boot screen needs (its fixed-looking rows go through
-  // computeBootRows() below, but they still need SOME minimum headroom)
-  // and rain rows get clipped by the controls row. MIN_ROWS=14 comfortably
-  // covers the 10-row authentic boot layout with margin.
+  // Cell width = drawable width / targetCols, and targetCols FALLS as the
+  // drawable gets wider: chunky when there is room, denser only when there
+  // has to be.
+  //   W <= 420 (phones)   24 columns. This is the floor that keeps the
+  //                       22-char boot header ("**** C64 BASIC V2 ****") on
+  //                       ONE row, untruncated, with margin at 320px CSS
+  //                       width (wrapper ~296px). Do not lower it below 22.
+  //   W >= 1000 (desktop) 16 columns.
+  //   in between          linear, so cell size grows smoothly with width.
+  // The old code raised the column count with width (24-34) AND forced 16
+  // rows everywhere; on a desktop the 16-row floor is what shrank cells to
+  // 30-40px. The row floor now also falls with height:
+  //   H <= 400 (phone landscape) 16 rows, as before,
+  //   H >= 560 (desktop)          7 rows, linear in between.
+  // 7 rows is enough because the boot text scrolls (see "Boot console").
+  const CH_RATIO=1.28;                  // cell height / cell width
+  const COLS_NARROW=24, W_NARROW=420;
+  const COLS_WIDE=16,   W_WIDE=1000;
+  const ROWS_SHORT=16,  H_SHORT=400;
+  const ROWS_TALL=7,    H_TALL=560;
+  const lerpClamp=(a,b,t)=>a+(b-a)*Math.min(1,Math.max(0,t));
   function chunkSize(W,H){
-    const targetCols=Math.max(24,Math.min(34,Math.round(W/16)));
+    const targetCols=lerpClamp(COLS_NARROW,COLS_WIDE,(W-W_NARROW)/(W_WIDE-W_NARROW));
+    const minRows=Math.round(lerpClamp(ROWS_SHORT,ROWS_TALL,(H-H_SHORT)/(H_TALL-H_SHORT)));
     let cw=Math.max(9,Math.floor(W/targetCols));
-    // 16, not 10: the derived SEARCH_ROW/loadRow (searching/loading states,
-    // computed from CMD_ROW in resize()) can land 1-2 rows past CMD_ROW
-    // when COLS is at the low end of its clamp — 16 keeps those in bounds
-    // too, not just the header/64K/READY/CMD rows computeBootRows() covers.
-    const MIN_ROWS=16;
-    if(H/Math.round(cw*1.28)<MIN_ROWS){
-      cw=Math.max(9,Math.floor((H/MIN_ROWS)/1.28));
-    }
-    return {cw, ch:Math.round(cw*1.28)};
+    // Shrink until minRows WHOLE rows fit. Uses the rounded cell height that
+    // resize() will actually use, so ROWS can never land one short. Only ever
+    // shrinks, so COLS can only grow: the 22-column floor cannot be broken.
+    while(cw>9&&Math.floor(H/Math.round(cw*CH_RATIO))<minRows) cw--;
+    return {cw, ch:Math.round(cw*CH_RATIO)};
   }
 
-  // Boot-text row positions. The authentic C64 spacing (2 blank lines
-  // between header and "64K RAM SYSTEM", etc.) needs 10 rows (0-9); a
-  // short landscape-phone viewport can have far fewer even after the
-  // height constraint above. Compress proportionally instead of using
-  // fixed rows that silently render below the visible area — that's what
-  // made a short landscape boot screen show almost nothing but the header.
-  function computeBootRows(){
-    const AUTHENTIC_ROWS_NEEDED=10; // CMD_ROW=9 is the last one, 0-indexed
-    if(ROWS>=AUTHENTIC_ROWS_NEEDED){
-      ROW_HEADER=2; ROW_RAM=5; ROW_READY=7; CMD_ROW=9;
-      return;
+  // Word-wrap into the fewest lines that fit `width`, then rebalance so the
+  // longest line is as short as possible ("**** C64" / "BASIC V2 ****" rather
+  // than a lone "****" on line two). A single word longer than the row is cut.
+  function wrapBalanced(str,width){
+    const words=str.split(' ');
+    const fits=(a,b)=>words.slice(a,b).join(' ').length<=width;
+    let k=0;
+    for(let i=0;i<words.length;){ let j=i+1; while(j<words.length&&fits(i,j+1)) j++; i=j; k++; }
+    let best=null;
+    (function rec(i,left,acc,max){
+      if(left===1){
+        if(!fits(i,words.length)) return;
+        const L=words.slice(i).join(' '), m=Math.max(max,L.length);
+        if(!best||m<best.m) best={m,lines:[...acc,L]};
+        return;
+      }
+      for(let j=i+1;j<=words.length-(left-1);j++){
+        if(!fits(i,j)) break;
+        const L=words.slice(i,j).join(' ');
+        rec(j,left-1,[...acc,L],Math.max(max,L.length));
+      }
+    })(0,k,[],0);
+    return best?best.lines:[str.slice(0,width)];
+  }
+
+  // Blank rows for the boot screen: lead-in, header→64K, 64K→READY, READY→cursor.
+  // The first entry is the authentic C64 spacing (rows 2/5/7/9); later ones
+  // squeeze the blanks out, in order, until the opening screen fits ROWS.
+  const BOOT_GAPS=[[2,2,1,1],[0,2,1,1],[0,1,1,1],[0,1,1,0],[0,0,0,0]];
+  function bootGaps(headerRows){
+    for(const g of BOOT_GAPS){
+      if(headerRows+g[0]+g[1]+1+g[2]+1+g[3]+1<=ROWS) return g;
     }
-    const last=Math.max(3,ROWS-1);
-    ROW_HEADER=0;
-    ROW_RAM=Math.max(1,Math.round(last/3));
-    ROW_READY=Math.max(ROW_RAM+1,Math.round(last*5/9));
-    CMD_ROW=Math.max(ROW_READY+1,last);
+    return BOOT_GAPS[BOOT_GAPS.length-1];
   }
 
   function applyFont(){
@@ -334,10 +353,9 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     ctx.fillStyle=bg();
     ctx.fillRect(0,0,CSS_W,CSS_H);
     initColumns();
-    computeBootRows();
-    // Recompute boot row positions after resize
-    const wrapRows=Math.ceil(LOAD_CMD.length/COLS);
-    SEARCH_ROW=CMD_ROW+wrapRows+1;
+    // A resize mid-boot rebuilds the (blank) grid; keep the console cursor
+    // inside it so the sequence carries on instead of drawing off-screen.
+    bc=Math.min(bc,COLS-1); br=Math.min(br,ROWS-1);
     updateDebugOverlay();
     return true;
   }
@@ -369,12 +387,32 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     ctx.fillText(ch,px+CELL_W/2,py+CELL_H-Math.floor(CELL_H*0.1));
   }
 
-  // Print a string left-to-right, wrapping at COLS
-  function printAt(col,row,str,color){
-    let c=col,r=row;
-    for(const ch of str){
-      drawCh(c,r,ch,color);
-      if(++c>=COLS){ c=0; r++; }
+  // ── Boot console ──────────────────────────────────────────────────
+  // Boot text is printed through a cursor (bc,br) that wraps at COLS and
+  // SCROLLS at ROWS, like the real C64 screen editor. A chunky desktop grid
+  // is only ~16 columns x 7 rows, too small for the whole sequence at fixed
+  // rows (anything past ROWS was silently dropped by drawCh's bounds check),
+  // so the screen scrolls up instead. On a tall phone grid nothing scrolls
+  // and the layout is the authentic rows 2/5/7/9.
+  // Boot text is one colour, so a scroll can redraw straight from `grid`.
+  function bootScroll(){
+    const LB=PALETTE[14];
+    for(let c=0;c<COLS;c++){ grid[c].copyWithin(0,1); grid[c][ROWS-1]=' '; }
+    fillBg();
+    for(let c=0;c<COLS;c++) for(let r=0;r<ROWS;r++) if(grid[c][r]!==' ') drawCh(c,r,grid[c][r],LB);
+  }
+  function bootNL(){ bc=0; if(++br>=ROWS){ br=ROWS-1; bootScroll(); } }
+  function bootBlank(n){ for(let i=0;i<n;i++) bootNL(); }
+  function bootEndLine(){ if(bc>0) bootNL(); }
+  // One glyph at the cursor, then advance. Wraps eagerly (cursor moves to the
+  // next row as soon as a row is full), which is what the typed command relies on.
+  function bootPut(ch){ drawCh(bc,br,ch,PALETTE[14]); if(++bc>=COLS) bootNL(); }
+  function bootWrite(str){ for(const ch of str) bootPut(ch); }
+  // Centred, word-wrapped onto as many rows as COLS needs (1 row at >=22 cols).
+  function bootCentered(str){
+    for(const line of wrapBalanced(str,COLS)){
+      bc=Math.max(0,Math.floor((COLS-line.length)/2));
+      bootWrite(line); bootEndLine();
     }
   }
 
@@ -396,16 +434,18 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     frame.style.background=fCol();
     clearGrid();
     const LB=PALETTE[14]; // light blue for text
-    // Authentic C64 layout when ROWS>=10 (2 blank lines between header and
-    // 64K, etc — rows 2/5/7/9); compressed proportionally on a shorter
-    // viewport instead — see computeBootRows(), called from resize()
-    // before this runs, so ROW_HEADER/ROW_RAM/ROW_READY/CMD_ROW are
-    // already set for the current ROWS.
-    const headerStr='**** C64 BASIC V2 ****';
-    printLine(Math.floor((COLS-headerStr.length)/2),ROW_HEADER,headerStr,LB);
-    printLine(0,ROW_RAM,'64K RAM SYSTEM',LB);
-    printLine(0,ROW_READY,'READY.',LB);
-    drawCh(0,CMD_ROW,'█',LB);        // cursor before LOAD cmd
+    // Authentic C64 spacing (rows 2/5/7/9) whenever ROWS allows; otherwise the
+    // blank rows are squeezed out (bootGaps) and, if it still does not fit,
+    // the screen scrolls. The header goes on one row at >=22 columns and is
+    // word-wrapped below that (a chunky desktop grid), never truncated.
+    const [lead,g1,g2,g3]=bootGaps(wrapBalanced(BOOT_HEADER,COLS).length);
+    bc=0; br=0;
+    bootBlank(lead);
+    bootCentered(BOOT_HEADER);
+    bootBlank(g1); bootWrite('64K RAM SYSTEM'); bootEndLine();
+    bootBlank(g2); bootWrite('READY.'); bootEndLine();
+    bootBlank(g3);
+    drawCh(bc,br,'█',LB);             // cursor before LOAD cmd
     bootState='waiting';              // ~1Hz blink pause before typing
     stateStart=performance.now();
     cursorOn=true; lastCursorToggle=performance.now();
@@ -516,10 +556,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       // ~1 Hz cursor blink before the user "types" LOAD
       if(now-lastCursorToggle>500){
         cursorOn=!cursorOn; lastCursorToggle=now;
-        drawCh(0,CMD_ROW,cursorOn?'█':' ',LB);
+        drawCh(bc,br,cursorOn?'█':' ',LB);
       }
       if(elapsed>1500){
-        cursorOn=false; drawCh(0,CMD_ROW,' ',LB);
+        cursorOn=false; drawCh(bc,br,' ',LB);
         bootState='typing'; stateStart=now;
         typingPos=0; lastTypeTime=now;
       }
@@ -528,47 +568,51 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
       // Cursor blink
       if(now-lastCursorToggle>350){
         cursorOn=!cursorOn; lastCursorToggle=now;
-        const cc=typingPos%COLS, cr=CMD_ROW+Math.floor(typingPos/COLS);
-        drawCh(cc,cr,cursorOn?'█':' ',LB);
+        drawCh(bc,br,cursorOn?'█':' ',LB);
       }
-      // Type next character
+      // Type next character (overwrites the cursor cell, wraps/scrolls as needed)
       if(now-lastTypeTime>TYPE_DELAY&&typingPos<LOAD_CMD.length){
-        const cc=typingPos%COLS, cr=CMD_ROW+Math.floor(typingPos/COLS);
-        drawCh(cc,cr,LOAD_CMD[typingPos],LB);
+        bootPut(LOAD_CMD[typingPos]);
         typingPos++;
-        const nc=typingPos%COLS, nr=CMD_ROW+Math.floor(typingPos/COLS);
-        drawCh(nc,nr,'█',LB);
+        drawCh(bc,br,'█',LB);
         lastTypeTime=now;
       }
       // Enter pressed — wait a beat then proceed
       if(typingPos>=LOAD_CMD.length&&elapsed>LOAD_CMD.length*TYPE_DELAY+900){
         // erase trailing cursor
-        const nc=typingPos%COLS, nr=CMD_ROW+Math.floor(typingPos/COLS);
-        drawCh(nc,nr,' ',LB);
+        drawCh(bc,br,' ',LB);
         bootState='searching'; stateStart=now;
       }
 
     } else if(bootState==='searching'){
       if(elapsed>350){
-        printAt(0,SEARCH_ROW,'SEARCHING FOR CHUNKY-MATRIX',LB);
+        bootEndLine(); bootNL();          // finish the command line, one blank row
+        bootWrite('SEARCHING FOR CHUNKY-MATRIX');
         bootState='found'; stateStart=now;
       }
 
     } else if(bootState==='found'){
       if(elapsed>1600){
-        const loadRow=SEARCH_ROW+Math.ceil(28/COLS)+1;
-        printAt(0,loadRow,'LOADING',LB);
+        bootEndLine(); bootNL();
+        bootWrite('LOADING');
         loadDuration=randRange(3500,8000);
         // set up linear PETSCII sweep
-        chaosPos=0; chaosTotal=COLS*ROWS;
-        // batch size: complete the sweep in ~loadDuration ms at ~60 fps
-        chaosBatch=Math.max(2,Math.ceil(chaosTotal/(loadDuration/1000*60)));
+        chaosPos=0; chaosTotal=COLS*ROWS; chaosCarry=0;
+        // cells per frame to complete the sweep in ~loadDuration ms at ~60 fps.
+        // Whole cells (rounded up) on a big grid, exactly as before. A chunky
+        // desktop grid is only ~110 cells, under 2 per frame, so it advances
+        // fractionally (carried) rather than being forced to 2, which would
+        // finish in about a second instead of the intended 3.5-8.
+        const perFrame=chaosTotal/(loadDuration/1000*60);
+        chaosBatch=perFrame>=2?Math.ceil(perFrame):perFrame;
         bootState='loading'; stateStart=now;
       }
 
     } else if(bootState==='loading'){
       // PETSCII chaos — linear sweep top-left → bottom-right (address order)
-      const end=Math.min(chaosPos+chaosBatch,chaosTotal);
+      chaosCarry+=chaosBatch;
+      const n=Math.floor(chaosCarry); chaosCarry-=n;
+      const end=Math.min(chaosPos+n,chaosTotal);
       for(let i=chaosPos;i<end;i++){
         const c=i%COLS, r=Math.floor(i/COLS);
         const ch=NOISE_CHARS[Math.floor(Math.random()*NOISE_CHARS.length)];

@@ -4,9 +4,10 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-21, by Claude (band-sync removed per PAUL-ERIC; see
-> "Removed on purpose"). Earlier: 2026-09-16 (crash fix, 6-item pass, mobile
-> bug CLOSED after 3 rounds + device confirmation, README rewrite, hint plate).
+> Last updated: 2026-09-21, by Claude (band-sync removed per PAUL-ERIC, see
+> "Removed on purpose"; desktop made chunky again, see "Desktop is chunky
+> again"). Earlier: 2026-09-16 (crash fix, 6-item pass, mobile bug CLOSED
+> after 3 rounds + device confirmation, README rewrite, hint plate).
 
 ## What this is
 
@@ -44,20 +45,27 @@ column per step).
   ~2.1MB), loaded via `document.fonts.load()` before boot starts, with an
   off-screen warm-up `fillText` to force glyph rasterization.
 - **Sizing**: `chunkSize(W,H)` takes the drawable width AND height in CSS
-  px (the `#c64-screen-wrapper` rect, not `window.innerWidth`) and derives
-  cell width from a target column count that scales with `W`, clamped to
-  `[24, 34]` columns, THEN shrinks further if needed so height still gives
-  at least `MIN_ROWS=16` rows (a short landscape viewport sized purely
-  from width could otherwise starve `ROWS`). Guarantees the 22-char boot
-  header always fits with margin at any width down to 320px and any
-  height down to ~250px tested, while staying "chunky" (not shrinking to
-  normal terminal density) on a large desktop window.
-- **Boot row layout**: `computeBootRows()` sets `ROW_HEADER`/`ROW_RAM`/
-  `ROW_READY`/`CMD_ROW` from `ROWS` — the authentic spacing (rows 2/5/7/9)
-  when `ROWS>=10`, compressed proportionally otherwise. Was hardcoded
-  literals before this session; that's what made a short landscape boot
-  screen render almost nothing (fixed rows fell outside `ROWS` and
-  silently didn't draw — `drawCh` bounds-checks and no-ops out of range).
+  px (the `#c64-screen-wrapper` rect, not `window.innerWidth`). Cell width
+  is `floor(W / targetCols)` and `targetCols` FALLS as the drawable widens:
+  24 at `W<=420` (phones), 16 at `W>=1000` (desktop), linear between. The
+  24 is the floor that keeps the 22-char boot header on ONE row with margin
+  at 320px CSS width (wrapper ~296px); never lower it below 22. A row floor
+  also falls with height: 16 rows at `H<=400` (phone landscape), 7 at
+  `H>=560` (desktop), linear between; the cell shrinks by whole pixels until
+  that many rows fit (using the rounded cell height resize() will use, so
+  `ROWS` can't land one short). It only ever shrinks, so `COLS` can only
+  grow and the 22-column floor can't be broken by the row constraint.
+  See "Desktop is chunky again" for the numbers and the reasoning.
+- **Boot console**: boot text is printed through a cursor (`bc`,`br`) that
+  wraps at `COLS` and SCROLLS at `ROWS`, like the real C64 screen editor
+  (`bootPut`/`bootWrite`/`bootNL`/`bootScroll`). This replaced the fixed
+  `ROW_HEADER/RAM/READY/CMD_ROW` + `computeBootRows()` scheme, which silently
+  dropped anything past `ROWS` (`drawCh` bounds-checks and no-ops). The
+  opening screen uses the authentic blank spacing (rows 2/5/7/9) whenever
+  `ROWS` allows and squeezes blanks out (`BOOT_GAPS`, in order) when it
+  doesn't. The header is word-wrapped and balanced (`wrapBalanced`) when
+  `COLS<22`, never truncated. A tall phone grid never scrolls and renders
+  exactly as before.
 - **DPR handling**: `resize()` sizes the canvas *backing store* to CSS px
   × `devicePixelRatio` and applies `ctx.setTransform(dpr,0,0,dpr,0,0)` —
   the ONLY place DPR enters the picture; everything else (`CELL_W/H`,
@@ -169,7 +177,85 @@ the tap-zone hint rendered inside the canvas, over actively-falling rain,
 both hard to read. Not a sizing bug — fixed separately (backing plate
 behind the hint text, commit `1cced0b`).
 
+## Desktop is chunky again (2026-09-21)
+
+PAUL-ERIC: "the chunk is the point." Desktop had regressed to 30-40px cells
+at 34-40 columns. The blame that round 1 put on the 22-char header floor was
+only half the story: measured on the untouched code, **every** desktop size
+landed on exactly 16 rows, i.e. the round-2 `MIN_ROWS=16` floor was pinning
+cell height, and the column clamp `[24,34]` (which *raised* columns with
+width) did the rest. Baseline (Chromium, wrapper size -> cols x rows @ cell):
+1024x768 34c x18r @28x36; 1280x720 40c x16r @30x38; 1366x768 40c x16r @32x41;
+1440x900 36c x16r @38x49; 1920x1080 39c x16r @47x60; 2560x1440 38c x16r @65x83.
+
+**Approach: a width-dependent target column count, plus a height-dependent row
+floor.** He suggested the first; the second turned out to be necessary. Fewer
+columns on a wide screen only helps if you also stop forcing 16 rows, because a
+16:9 window at 16 columns has room for only ~7 rows. So both fall on desktop and
+both stay put on phones. Why not a fixed pixel cell size: a flat px cell was the
+original bug (7 giant columns on a phone). Why not device sniffing: two
+continuous ramps have no cliffs and no UA checks, and an odd window size just
+lands somewhere sensible on the ramp.
+
+Measured after (same harness, Chromium and WebKit, DPR 1/2/3, all identical):
+1024x768 16c x9r @58x74; 1280x720 17c x7r @69x88; 1366x768 17c x7r @73x93;
+1440x900 16c x7r @85x109; 1920x1080 17c x7r @108x138; 2560x1440 16c x7r
+@148x189. Glyphs are ~49-127px. 800x600 window: 21c x11r; 1440x900 rotated
+(portrait window): 18c x22r.
+
+**Phones are unchanged where it counts.** Every phone-portrait size is
+identical to before, and the two on-device readings from this file reproduce
+exactly (378x634 -> 25c x33r @15x19; 708x272 -> 54c x16r @13x17). Two
+unconfirmed phone-landscape sizes shift by one cell size (536x270: 13x17/15
+rows -> 12x15/18 rows; 880x349: 17x22/15 rows -> 16x20/17 rows) because the old
+formula fell one row short of its own 16-row floor and the new loop enforces it.
+
+**Consequences of chunky, handled:**
+1. *Header can't fit one row at 16-17 columns.* At `COLS<22` the header is
+   word-wrapped and balanced ("**** C64" / "BASIC V2 ****"), never truncated.
+   The 22-char single-row requirement holds at 320px (and every phone width):
+   verified. This amends the old "boot text uses `printLine`, truncates, never
+   wraps" decision for the header only; that rule existed to protect fixed row
+   spacing, which the boot console no longer relies on.
+2. *7-9 rows can't hold the boot sequence.* The boot console scrolls (see
+   Architecture), like a real C64. On desktop the header scrolls off once the
+   LOAD command and SEARCHING/LOADING lines print. Every line prints in full.
+3. *The PETSCII sweep would have finished in ~1s.* Its per-frame batch was
+   `max(2, ...)`; a ~110-cell desktop grid needs under 1 cell/frame to take the
+   intended 3.5-8s. Grids needing >=2 cells/frame behave exactly as before;
+   smaller ones now advance fractionally (carried).
+
+**Verified** with `tests/verify-layout.mjs` (see Settled Decisions): 66 cases
+(Chromium + WebKit x DPR 1/2/3 x 320/375/390/414/430 portrait and the six
+desktop sizes), each through portrait -> rotated -> rotated-back, asserting
+against a FRESH `getBoundingClientRect`: canvas box == wrapper, the app's own
+drawable == the fresh canvas rect (the round-3 stale-measure class), backing
+store == CSS x DPR, `COLS*CELL_W`/`ROWS*CELL_H` <= drawable, every painted
+cell and glyph inside the canvas, wrapper above the controls row, header on one
+row at phone widths, every boot line printed in full, desktop 14-18 columns and
+cells >= 55px. Zero page errors. The verifier was proven to discriminate: it
+fails, with a specific message, on re-created versions of the round-2 canvas
+box bug, the round-3 no-ResizeObserver bug, the `ceil` overflow, a broken
+22-column floor, the old 16-row floor on desktop, and disabled boot scrolling.
+
+**Not verified, needs eyes:** an actual desktop screen and the actual iPhone
+(both via PAUL-ERIC). Rain trail length (`len` 6-21) is unchanged, so at 7 rows
+most columns are nearly full-height streams; that was also true of the old
+~10-row feel, but it's more pronounced now. If it reads as a wall of glyphs,
+scale `len` by `ROWS`; deliberately not done unasked.
+
+**Pre-existing, noticed, not touched:** `resize()` rebuilds the grid without
+redrawing boot text, so a resize mid-boot leaves the boot screen blank until the
+next state prints. In real time the initial `ResizeObserver` callback lands
+before the font resolves, so boot text survives; it only wiped under a mocked
+clock. Rotating during the ~18s boot on a phone would hit it.
+
 ## Fixed this session (round 2): the REAL mobile bug — canvas box sizing
+
+> Historical. The `MIN_ROWS=16` floor and `computeBootRows()` described in
+> this section were superseded on 2026-09-21 (see "Desktop is chunky again").
+> The canvas-box-sizing root cause and its CSS rule are unchanged and still
+> must never be removed.
 
 Round 1 (`c19602d`) fixed a genuine bug (flat desktop-tuned cell-size
 divisor) but introduced DPR-scaling for the canvas backing store
@@ -371,13 +457,17 @@ keep it that way rather than letting it drift stale again.
 - Binary assets (font, soundtrack) are committed directly to the repo, not
   via Git LFS or an external CDN — flagged, not yet decided on.
 - 16-color "Pepto" C64 palette is fixed/canonical.
-- Boot single-line text (header, "64K RAM SYSTEM", "READY.") uses
-  `printLine()` (truncates, never wraps) instead of `printAt()` (wraps) —
-  keep using `printLine` for any new boot text landing on an exact row.
+- Boot text goes through the boot console (`bootPut`/`bootWrite`/`bootNL`),
+  which wraps and scrolls. The header is the one line that word-wraps
+  (below 22 columns); everything else prints as written. `printLine()`
+  (truncating) survives only for the post-load "READY." screen at fixed
+  rows 1/3/4, which needs `ROWS>=5`.
 - Cell sizing is `chunkSize(W,H)` keyed off actual drawable width AND
-  height, target column count clamped `[24,34]`, height-constrained to
-  `MIN_ROWS=16` — don't reintroduce a flat px-per-cell divisor or a
-  width-only formula, both are exactly what broke on real phones.
+  height: target columns fall from 24 (`W<=420`) to 16 (`W>=1000`), the row
+  floor falls from 16 (`H<=400`) to 7 (`H>=560`). Never lower the narrow-end
+  24 below 22 (the 22-char header floor at 320px). Don't reintroduce a flat
+  px-per-cell divisor, a width-only formula, or a universal row floor: the
+  first two broke real phones, the last one made desktop small.
 - Canvas backing store is DPR-scaled (`CSS_W/H * devicePixelRatio`); any
   new code drawing to the canvas should keep using CSS-px coordinates
   (`CELL_W`, `CSS_W`, etc.) — the `ctx` transform handles the rest. Don't
@@ -387,10 +477,6 @@ keep it that way rather than letting it drift stale again.
   reintroduces the real mobile bug (on-screen box falls back to the
   DPR-scaled backing-store attribute size, `devicePixelRatio`× too large).
   This is not redundant with `inset:0`, don't "simplify" it away.
-- Boot row positions (`ROW_HEADER`/`ROW_RAM`/`ROW_READY`/`CMD_ROW`) are
-  set by `computeBootRows()` from `ROWS`, not hardcoded — needed for
-  short (landscape) viewports. Any new boot text with a fixed row should
-  go through something similar, not a bare literal.
 - Verify canvas/CSS-sizing bugs with a real geometric assertion (rendered
   content size vs `getBoundingClientRect`, independently measured) — a
   `getImageData`/ink-stripe check of the canvas's own buffer is blind to
@@ -416,24 +502,24 @@ keep it that way rather than letting it drift stale again.
 
 ## Outstanding questions for PAUL-ERIC
 
-One still open (the other, band-sync, was decided: removed):
+Both earlier questions are decided (band-sync: removed; desktop cell size:
+made chunky, 14-18 columns). Open only as things for him to look at:
 
-1. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
-   from round 1's universal 22-char-header floor) — acceptable as-is, or
-   does he want desktop kept chunkier even at the cost of the floor not
-   scaling perfectly smoothly across all widths?
+1. **Eyes on desktop and on the iPhone** for the 2026-09-21 sizing change.
+   Desktop should read as ~16-17 big columns, header on two lines, boot text
+   scrolling. iPhone (both orientations, `?debug=1`) should read exactly as
+   the confirmed numbers under "Current status".
+2. **Rain density at 7 rows** (see "Desktop is chunky again", "Not
+   verified"): if it reads as a wall of glyphs, scale trail `len` by `ROWS`.
 
 ## Immediate next steps
 
-1. Verify GitHub Pages redeployed this session's final commit and the
-   live URL serves it byte-for-byte (build-status API + curl diff against
-   local HEAD, same method as every prior push this project) — not yet
-   done for the last few commits (hint-plate fix, README rewrite, this
-   file). Do that first, before anything else.
-2. Nothing else is queued. The mobile bug is closed, README is current.
-   Next work is whichever of the two open questions above PAUL-ERIC
-   decides on, or Git LFS for the two large binaries (font `.ttf`,
-   soundtrack `.mp4` — not urgent, flagged, never blocking).
+1. After any push, verify GitHub Pages redeployed it and the live URL serves
+   the committed bytes (build-status API, then curl the live `index.html` and
+   compare its hash to `git show HEAD:index.html`). Standing step, every push.
+2. Nothing else is queued. Possible follow-ups, none started: redraw boot text
+   on a resize mid-boot (pre-existing gap, see above); Git LFS for the two
+   large binaries (font `.ttf`, soundtrack `.mp4`), not urgent.
 
 Don't start new work without checking in — this file is a snapshot, not
 a plan.
