@@ -4,8 +4,9 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-16, by Claude (crash fix, 6-item pass, mobile bug
-> CLOSED after 3 rounds + device confirmation, README rewrite, hint plate).
+> Last updated: 2026-09-21, by Claude (band-sync removed per PAUL-ERIC; see
+> "Removed on purpose"). Earlier: 2026-09-16 (crash fix, 6-item pass, mobile
+> bug CLOSED after 3 rounds + device confirmation, README rewrite, hint plate).
 
 ## What this is
 
@@ -91,11 +92,11 @@ column per step).
   the query param. Permanent diagnostic tool, not a one-off — keep it. It
   is, as of round 3, the thing that actually found both real bugs; trust
   its numbers over any emulated test in this repo.
-- **Rain**: each column is `{x, row, speed, delay, len, band}`. `band` is
-  `x % 4` (4 groups); `updateMatrix()` gives each band an identical phase
-  offset so columns in the same band crest together — a real synced-wave
-  effect, not a per-column gradient (see "Experimental — needs your eyes"
-  below, this is v1 and may need tuning).
+- **Rain**: each column is `{x, row, speed, delay, len}`. `updateMatrix()`
+  gives every column an occasional extra tick from a travelling wave whose
+  phase is offset by the column's own `x`
+  (`sin(rainFrame*0.05 - col.x*0.25) > 0.82`), so a crest sweeps across the
+  columns. There are no column groups; see "Removed on purpose".
 - **Palette**: 16-color C64 "Pepto" palette. Tap-to-cycle: tap a glyph →
   cycle head color; tap empty cell → cycle background; tap the frame border
   → cycle frame color. Short tap = one step. Hold >500ms → fast-cycle at
@@ -321,17 +322,22 @@ Fix (commit `2ac0f30`): `resize()` returns `false` and touches no state on
 a 0×0 rect, retrying via `requestAnimationFrame`; all four bounds checks
 flipped to positive-AND form so a stray `NaN` can't slip through again.
 
-## Experimental — needs your eyes
+## Removed on purpose — don't resurrect
 
-**Band-sync wave (commit `da4c4fe`), v1.** `makeColumn()` set `band: x%4`
-on every column, but `updateMatrix()` never read it — the wave-boost phase
-was computed from `col.x` directly (a smooth per-column gradient), not a
-band grouping, even though the comment claimed otherwise. Changed the
-phase formula to `Math.sin(rainFrame*0.05 + col.band*(Math.PI/2))` so
-columns in the same band get an identical boost every frame — a wave
-passing through 4 discrete clusters. Not tuned: frame scale (`0.05`),
-phase spacing (`PI/2`), crest threshold (`0.82`) are starting points.
-**Still waiting on your eyes on this — keep, retune, or scrap.**
+**Band-sync (2026-09-21, PAUL-ERIC's decision).** He doesn't want it. It was
+never really implemented: `makeColumn()` set `band: x%4` on every column and
+nothing read it until commit `da4c4fe` (2026-09-16) wired it up as an
+experimental variant that gave each group of columns an identical wave phase.
+That variant and the `band` field are deleted outright: no flag, no
+commented-out block. Rain is back to the per-column travelling wave that
+existed before `da4c4fe` (byte-identical line:
+`Math.sin(rainFrame*0.05 - col.x*0.25) > 0.82`).
+
+Why it kept coming up: the comment above the wave line used to say "columns in
+the same band share a phase", which was never true of the code (phase came from
+`col.x`, a smooth per-column gradient). That comment is what made "band-sync"
+look half-built. It is gone. If you ever see a comment claiming columns share
+a phase, it is wrong. Don't wire up `band` again without PAUL-ERIC asking.
 
 ## Verified but not touched (already correct from `0804cad`)
 
@@ -402,8 +408,7 @@ keep it that way rather than letting it drift stale again.
   the HUD collision on mobile. Keep its backing plate
   (`background`+`padding`) too — without one it's unreadable over the
   rain it renders on top of, confirmed on a real device.
-- Band-sync is genuinely experimental — don't treat the v1 constants as
-  final without feedback.
+- Band-sync is removed, not disabled. See "Removed on purpose".
 - This session's browser pane can serve stale `screenshot` composites for
   canvas content when backgrounded — prefer direct state reads
   (`getImageData`, or a temporary debug hook) over screenshots when
@@ -411,16 +416,12 @@ keep it that way rather than letting it drift stale again.
 
 ## Outstanding questions for PAUL-ERIC
 
-Both explicitly undecided — do not act on either without his say-so:
+One still open (the other, band-sync, was decided: removed):
 
 1. **Desktop cell-size side effect** (~57px/14cols → ~30-40px/25-32cols,
    from round 1's universal 22-char-header floor) — acceptable as-is, or
    does he want desktop kept chunkier even at the cost of the floor not
    scaling perfectly smoothly across all widths?
-2. **Band-sync v1** (commit `da4c4fe`) — keep, retune the constants
-   (frame scale `0.05`, phase spacing `PI/2`, crest threshold `0.82`), or
-   scrap for a different shape entirely? Live on the deployed site now,
-   never explicitly reviewed.
 
 ## Immediate next steps
 

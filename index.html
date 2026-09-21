@@ -227,7 +227,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
   let ROW_HEADER=2, ROW_RAM=5, ROW_READY=7;
   // PETSCII linear sweep state
   let chaosPos=0, chaosTotal=0, chaosBatch=0;
-  // rain wave-band frame counter
+  // rain frame counter (drives the travelling wave in updateMatrix)
   let rainFrame=0;
   const LOAD_CMD    = 'LOAD "CHUNKY-MATRIX",8,1';
   const TYPE_DELAY  = 130; // ms per keystroke
@@ -447,7 +447,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 
   function makeColumn(x){
     const sp=(Math.random()*4|0)+1;
-    return{x,row:Math.random()*ROWS|0,speed:sp,delay:sp,len:(Math.random()*16|0)+6,band:x%4};
+    return{x,row:Math.random()*ROWS|0,speed:sp,delay:sp,len:(Math.random()*16|0)+6};
   }
 
   function initColumns(){
@@ -483,12 +483,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     rainFrame++;
     for(let x=0;x<COLS;x++){
       const col=columns[x];
-      // Wave-band (experimental, v1): the 4 bands assigned in makeColumn()
-      // get evenly-spaced phase offsets, so each band crests in turn and
-      // gets an occasional extra tick — a visible wave sweeping through 4
-      // discrete groups, not a per-column gradient. col.band was set but
-      // unused before this; iterate on the constants below by feel.
-      const waveBoost=Math.sin(rainFrame*0.05+col.band*(Math.PI/2))>0.82?1:0;
+      // Travelling wave: each column's phase is offset by its x, so a crest
+      // sweeps across the columns and gives the ones it passes an occasional
+      // extra tick. There are no column groups; phase is a smooth function of x.
+      const waveBoost=Math.sin(rainFrame*0.05-col.x*0.25)>0.82?1:0;
       col.delay=Math.max(0,col.delay-1-waveBoost);
       if(col.delay>0) continue;
       col.delay=col.speed; col.row++;

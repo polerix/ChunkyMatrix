@@ -19,7 +19,6 @@ Each of the N columns (dynamic; fills the viewport) maintains state:
 | `row` | 0 → ROWS+len | Current head position |
 | `speed` | 1–4 frames/step | How many frames between advances |
 | `len` | 6–21 rows | Trail length |
-| `band` | 0–3 | Which of 4 wave-sync groups this column belongs to (browser-only, see below) |
 
 **Per-column step** (only runs when the countdown expires):
 
