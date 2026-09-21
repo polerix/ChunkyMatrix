@@ -477,6 +477,7 @@ keep it that way rather than letting it drift stale again.
   reintroduces the real mobile bug (on-screen box falls back to the
   DPR-scaled backing-store attribute size, `devicePixelRatio`× too large).
   This is not redundant with `inset:0`, don't "simplify" it away.
+- **Run `tests/verify-layout.mjs` before and after any sizing/layout change** (command in README, "Testing"). It is the canonical check; don't rebuild an ad-hoc one. It was proven to fail on each past bug class. Gotchas found writing it: a "full-canvas fill" must be detected relative to the viewport (a chunky cell exceeds any fixed size); the cell is the LARGEST frequent rect (sprite pixels outnumber cell fills); a mocked clock changes startup ordering so the boot screen can look blank; on a 7-row grid a rain column can legitimately draw nothing for ~2.2s.
 - Verify canvas/CSS-sizing bugs with a real geometric assertion (rendered
   content size vs `getBoundingClientRect`, independently measured) — a
   `getImageData`/ink-stripe check of the canvas's own buffer is blind to

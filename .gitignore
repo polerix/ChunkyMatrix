@@ -14,3 +14,6 @@
 *.pem
 *.p12
 id_rsa*
+
+# dev tooling only (tests/verify-layout.mjs); the app has no dependencies
+node_modules/

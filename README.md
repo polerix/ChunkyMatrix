@@ -98,6 +98,17 @@ Re-sizing is driven by a `ResizeObserver` on the screen area, not a `window resi
 - **Hold** (>500ms) any of the above to fast-cycle at 150ms/step instead of one step per tap.
 - A brief on-screen hint (`tap glyph · tap space · tap frame | hold = fast-cycle`) appears when the rain starts and fades after 5 seconds.
 
+## Testing
+
+`tests/verify-layout.mjs` is a layout verifier, dev tooling only (the app itself still has no dependencies). It drives real Chromium and WebKit at DPR 1/2/3 across phone and desktop sizes and a simulated rotation, and asserts what is actually drawn against a fresh `getBoundingClientRect`: the canvas box equals its wrapper, the app's own idea of the drawable equals the fresh rect, content never exceeds the drawable area, the boot text prints in full, and the 22-character header fits one row at phone widths.
+
+```bash
+npm i --no-save playwright-core && npx playwright install chromium webkit
+node tests/verify-layout.mjs --root . --expect-desktop     # about 5 minutes, exits non-zero on failure
+```
+
+It exists because the earlier "ink stripe" check read the canvas's own pixel buffer and false-passed the real mobile bug twice. See the header of the file and STATE.md.
+
 ## Debug Mode
 
 Load with `?debug=1` for an on-screen, semi-transparent readout of every width/height signal the layout math depends on: `devicePixelRatio`, `window.innerWidth/innerHeight`, `visualViewport`, the screen wrapper's rect and `clientWidth`, the canvas's CSS size vs. its backing-store size, computed cell size, `COLS`/`ROWS`, and the current boot state. It polls once a second. This is the tool that found and confirmed the fix for two real-device-only mobile layout bugs that emulated testing missed — trust it over a desktop browser's dev tools when diagnosing anything on an actual phone.
