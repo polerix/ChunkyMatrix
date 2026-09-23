@@ -356,6 +356,17 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
     // A resize mid-boot rebuilds the (blank) grid; keep the console cursor
     // inside it so the sequence carries on instead of drawing off-screen.
     bc=Math.min(bc,COLS-1); br=Math.min(br,ROWS-1);
+    // The line above keeps the cursor in bounds, but nothing repaints what
+    // was already drawn — the canvas stays blank until the next scheduled
+    // boot event (next cursor blink, next typed character), which can be
+    // most of a second away. Restart the boot sequence instead: typed/
+    // searched/swept progress is relative to the OLD column count and
+    // can't be replayed correctly on a new one anyway, so a clean restart
+    // is both simpler and correct. Excludes 'rain' (repaints itself every
+    // tick, no gap to fix) and 'init' (the pre-first-boot sentinel, so
+    // this doesn't double up with startWhenLaidOut()'s own startBoot()
+    // call right after its first resize()).
+    if(bootState!=='init'&&bootState!=='rain') startBoot();
     updateDebugOverlay();
     return true;
   }
