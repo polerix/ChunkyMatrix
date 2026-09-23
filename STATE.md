@@ -4,10 +4,12 @@
 > whatever) picks up next should be able to read this cold and know exactly
 > where things stand — no re-deriving from commit archaeology.
 >
-> Last updated: 2026-09-21, by Claude (band-sync removed per PAUL-ERIC, see
-> "Removed on purpose"; desktop made chunky again, see "Desktop is chunky
-> again"). Earlier: 2026-09-16 (crash fix, 6-item pass, mobile bug CLOSED
-> after 3 rounds + device confirmation, README rewrite, hint plate).
+> Last updated: 2026-09-23, by Claude (fixed the resize-mid-boot blank
+> screen; see "Fixed: resize mid-boot leaves the canvas blank"). Earlier:
+> 2026-09-21 (band-sync removed per PAUL-ERIC, see "Removed on purpose";
+> desktop made chunky again, see "Desktop is chunky again"); 2026-09-16
+> (crash fix, 6-item pass, mobile bug CLOSED after 3 rounds + device
+> confirmation, README rewrite, hint plate).
 
 ## What this is
 
@@ -408,6 +410,35 @@ Fix (commit `2ac0f30`): `resize()` returns `false` and touches no state on
 a 0×0 rect, retrying via `requestAnimationFrame`; all four bounds checks
 flipped to positive-AND form so a stray `NaN` can't slip through again.
 
+## Fixed: resize mid-boot leaves the canvas blank (2026-09-23)
+
+`resize()` clamped the boot cursor (`bc`/`br`) into the new `COLS`/`ROWS` but
+never repainted anything — its own background clear wipes whatever boot text
+was already drawn, and nothing redraws it. Only whatever comes NEXT (the next
+typed character, the next cursor blink) appears, on an otherwise blank
+canvas, until the state machine reaches 'ready'/'rain' and does its own full
+clear. Reachable by rotating a phone during the ~18s boot sequence — this was
+flagged as a known gap during the 2026-09-21 chunky-desktop work, not
+introduced by it.
+
+Confirmed directly (temp harness, not committed): reconstructing the
+on-screen grid text right after a mid-typing resize showed a single stray
+typed character with no header/64K RAM SYSTEM/READY. on the unfixed code; the
+full opening screen reappeared immediately with the fix.
+
+Fix: `resize()` now calls `startBoot()` again if it lands mid-boot —
+`bootState` is neither `'init'` (the pre-first-boot sentinel, so this doesn't
+double up with `startWhenLaidOut()`'s own `startBoot()` call right after its
+first `resize()`) nor `'rain'` (repaints itself every tick, no gap to fix).
+Typed/searched/swept progress is relative to the OLD column count and can't
+be replayed correctly on a new one anyway, so restarting the boot sequence
+cleanly is simpler and correct rather than trying to resume mid-sequence.
+
+Verified: `tests/verify-layout.mjs`, full 66-case matrix (Chromium + WebKit,
+DPR 1/2/3, all phone and desktop viewports, each through a rotation), 0
+failures — unchanged from before this fix, so nothing regressed. Deployed;
+GitHub Pages confirmed serving the commit byte-for-byte.
+
 ## Removed on purpose — don't resurrect
 
 **Band-sync (2026-09-21, PAUL-ERIC's decision).** He doesn't want it. It was
@@ -503,8 +534,10 @@ keep it that way rather than letting it drift stale again.
 
 ## Outstanding questions for PAUL-ERIC
 
-Both earlier questions are decided (band-sync: removed; desktop cell size:
-made chunky, 14-18 columns). Open only as things for him to look at:
+All three earlier questions are decided or fixed (band-sync: removed;
+desktop cell size: made chunky, 14-18 columns; resize-mid-boot blank screen:
+fixed 2026-09-23). Open only as things for him to look at, logged in
+`/Volumes/Clay/GitHub/_backlog/TODO.md`:
 
 1. **Eyes on desktop and on the iPhone** for the 2026-09-21 sizing change.
    Desktop should read as ~16-17 big columns, header on two lines, boot text
@@ -512,15 +545,20 @@ made chunky, 14-18 columns). Open only as things for him to look at:
    the confirmed numbers under "Current status".
 2. **Rain density at 7 rows** (see "Desktop is chunky again", "Not
    verified"): if it reads as a wall of glyphs, scale trail `len` by `ROWS`.
+3. **Whether the restored per-column wave should also go**, since he said
+   "rip out band-sync" and this is the older, different effect that took
+   band-sync's place, not literally band-sync itself. See "Removed on
+   purpose" and the backlog.
 
 ## Immediate next steps
 
 1. After any push, verify GitHub Pages redeployed it and the live URL serves
    the committed bytes (build-status API, then curl the live `index.html` and
    compare its hash to `git show HEAD:index.html`). Standing step, every push.
-2. Nothing else is queued. Possible follow-ups, none started: redraw boot text
-   on a resize mid-boot (pre-existing gap, see above); Git LFS for the two
-   large binaries (font `.ttf`, soundtrack `.mp4`), not urgent.
+2. Nothing else is queued locally. Open items needing PAUL-ERIC are tracked in
+   `/Volumes/Clay/GitHub/_backlog/TODO.md`, not duplicated here: the
+   per-column wave decision, rain density at 7 rows. Also not started: Git LFS
+   for the two large binaries (font `.ttf`, soundtrack `.mp4`), not urgent.
 
 Don't start new work without checking in — this file is a snapshot, not
 a plan.
