@@ -17,3 +17,8 @@ id_rsa*
 
 # dev tooling only (tests/verify-layout.mjs); the app has no dependencies
 node_modules/
+
+# Compliance hygiene
+.venv/
+venv/
+__pycache__/

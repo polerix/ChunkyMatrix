@@ -145,3 +145,16 @@ It ran on the first try. Assembled with `acme -f cbm -o matrix.prg matrix.asm`.
 The source code in this repository is released under the [MIT License](LICENSE).
 
 Third-party material bundled in this repository (fonts, audio, video, artwork, saved web pages and similar files) is **not** covered by that license. It remains the property of its respective owners and is included under their own terms. If you are a rights holder and want something removed, please open an issue.
+
+## Deployment & Repository Status
+
+- **Standardized Name**: `ChunkyMatrix`
+- **Remote Origin**: `https://github.com/polerix/ChunkyMatrix.git`
+- **License Level**: `MIT` ([`LICENSE`](LICENSE))
+- **Security Policy**: [`SECURITY.md`](SECURITY.md)
+- **GitHub Actions**: Static / Manual
+- **Last Compliance Audit**: `2026-10-18`
+
+### GitHub CleanUp Log
+- **Unused / Archive / Cache Items Moved to `/Volumes/Clay/GitHubCleanUp/ChunkyMatrix/`**: 1 item(s) (0 files, 0.00 MB)
+  - `node_modules` — Local dependency/build cache (node_modules) (0 file(s), 0.0 KB)
